@@ -4,8 +4,7 @@ pragma solidity ^0.8.19;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
-
+import {IStrategyStMnt} from "./interfaces/IStrategy.sol";
 
 library Math {
     function abs(uint256 x, uint256 y) internal pure returns (uint256) {
@@ -15,7 +14,6 @@ library Math {
 
 contract StableSwap is ERC20 {
     using SafeERC20 for IERC20;
-
 
     // Number of tokens
     uint256 private constant N = 2;
@@ -41,25 +39,28 @@ contract StableSwap is ERC20 {
 
     // 1 share = 1e18, 18 decimals
 
-
-
     //! MODIFICHE PER STRATEGIA
-    uint256[N] public balanceInStrategy; 
+    uint256[N] public balanceInStrategy;
 
-
-
-
-
-    constructor(address[N] memory _tokens) ERC20("StableSwap MNT/stMNT", "SS-MNT/stMNT") {
+    constructor(
+        address[N] memory _tokens
+    ) ERC20("StableSwap MNT/stMNT", "SS-MNT/stMNT") {
         tokens = _tokens;
     }
 
-
     // Return precision-adjusted balances, adjusted to 18 decimals
+    /*
     function _xp() private view returns (uint256[N] memory xp) {
         for (uint256 i; i < N; ++i) {
             xp[i] = balances[i] * multipliers[i];
         }
+    }*/
+    function _xp() private view returns (uint256[N] memory xp) {
+        // Saldo di MNT = MNT nel contratto + MNT prestato alla strategy
+        xp[0] = (balances[0] + totalLentToStrategy) * multipliers[0];
+
+        // Saldo di stMNT (invariato)
+        xp[1] = balances[1] * multipliers[1];
     }
 
     /**
@@ -243,30 +244,39 @@ contract StableSwap is ERC20 {
         uint256 i,
         uint256 j,
         uint256 dx,
-        uint256 minDy
+        uint256 minDy /* nonReentrant */
     ) external returns (uint256 dy) {
         require(i != j, "i = j");
 
         IERC20(tokens[i]).transferFrom(msg.sender, address(this), dx);
 
-        // Calculate dy
+        // Calculate dy (logica invariata)
         uint256[N] memory xp = _xp();
         uint256 x = xp[i] + dx * multipliers[i];
 
         uint256 y0 = xp[j];
         uint256 y1 = _getY(i, j, x, xp);
-        // y0 must be >= y1, since x has increased
-        // -1 to round down
         dy = (y0 - y1 - 1) / multipliers[j];
 
-        // Subtract fee from dy
         uint256 fee = (dy * SWAP_FEE) / FEE_DENOMINATOR;
         dy -= fee;
         require(dy >= minDy, "dy < min");
 
+        // ======================= INIZIO MODIFICA LOGICA =======================
+        // Se stiamo prelevando MNT (j=0) e non ne abbiamo abbastanza liquidi...
+        if (j == 0 && IERC20(tokens[0]).balanceOf(address(this)) < dy) {
+            uint256 amountNeeded = dy -
+                IERC20(tokens[0]).balanceOf(address(this));
+            // ...lo richiamiamo dalla Strategy.
+            IStrategyStMnt(strategy).poolCallWithdraw(amountNeeded);
+        }
+        // ======================== FINE MODIFICA LOGICA ========================
+
+        // Aggiorna la contabilità interna della pool (logica invariata)
         balances[i] += dx;
         balances[j] -= dy;
 
+        // Trasferisci i fondi all'utente (logica invariata)
         IERC20(tokens[j]).transfer(msg.sender, dy);
     }
 
@@ -339,17 +349,31 @@ contract StableSwap is ERC20 {
     ) external returns (uint256[N] memory amountsOut) {
         uint256 _totalSupply = totalSupply();
 
-        for (uint256 i; i < N; ++i) {
-            uint256 amountOut = (balances[i] * shares) / _totalSupply;
-            require(amountOut >= minAmountsOut[i], "out < min");
+        // Calcola la quota di MNT a cui l'utente ha diritto
+        uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
+        require(mntAmountOut >= minAmountsOut[0], "MNT out < min");
 
-            balances[i] -= amountOut;
-            amountsOut[i] = amountOut;
+        // Calcola la quota di stMNT a cui l'utente ha diritto
+        uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
+        require(stMntAmountOut >= minAmountsOut[1], "stMNT out < min");
 
-            IERC20(tokens[i]).transfer(msg.sender, amountOut);
+        amountsOut[0] = mntAmountOut;
+        amountsOut[1] = stMntAmountOut;
+
+        // Se l'MNT liquido non è sufficiente, lo richiamiamo dalla strategy
+        uint256 liquidMnt = IERC20(tokens[0]).balanceOf(address(this));
+        if (liquidMnt < mntAmountOut) {
+            IStrategyStMnt(strategy).poolCallWithdraw(mntAmountOut - liquidMnt);
         }
 
+        // Aggiorna la contabilità interna
+        balances[0] -= mntAmountOut;
+        balances[1] -= stMntAmountOut;
+
+        // Brucia le quote e trasferisce i token
         _burn(msg.sender, shares);
+        IERC20(tokens[0]).safeTransfer(msg.sender, mntAmountOut);
+        IERC20(tokens[1]).safeTransfer(msg.sender, stMntAmountOut);
     }
 
     /**
@@ -415,10 +439,80 @@ contract StableSwap is ERC20 {
         (amountOut, ) = _calcWithdrawOneToken(shares, i);
         require(amountOut >= minAmountOut, "out < min");
 
+        // Se si preleva MNT (i=0) e non ce n'è abbastanza, lo richiamiamo
+        if (i == 0 && IERC20(tokens[0]).balanceOf(address(this)) < amountOut) {
+            IStrategyStMnt(strategy).poolCallWithdraw(
+                amountOut - IERC20(tokens[0]).balanceOf(address(this))
+            );
+        }
+
         balances[i] -= amountOut;
         _burn(msg.sender, shares);
 
-        IERC20(tokens[i]).transfer(msg.sender, amountOut);
+        IERC20(tokens[i]).safeTransfer(msg.sender, amountOut);
+    }
+
+    //!   // =================================================================
+
+    //! FUNZIONI CUSTOMIZATE PER LA STRATEGIA
+
+    address public strategy;
+    uint256 public totalLentToStrategy; // Il "debito" che la Strategy ha verso la Pool
+
+    function setStrategy(address _strategy) external /*onlyOwner*/ {
+        strategy = _strategy;
+    }
+
+    function lendToStrategy() external /*onlyOwner*/ {
+        require(strategy != address(0), "Strategy not set");
+
+        // Calcola il 30% del saldo di MNT come buffer
+        uint256 bufferAmount = (balances[0] * 30) / 100;
+        uint256 mntInContract = IERC20(tokens[0]).balanceOf(address(this));
+
+        if (mntInContract > bufferAmount) {
+            uint256 amountToLend = mntInContract - bufferAmount;
+
+            // Aggiorna la contabilità del debito
+            totalLentToStrategy += amountToLend;
+
+            // Invia i fondi alla strategy
+            IERC20(tokens[0]).safeTransfer(strategy, amountToLend);
+
+            // Chiama la funzione di investimento sulla strategy
+            //!PER ORA TENIAMO UN APPROCCIO MANUALE, DEVO CHIAMARE L'HARVEST IO, COSI IMPLEMENTO IL MECCANISCO DI DEGRADAZIONE PER EVITARE EXPLOIT
+            //TODO IStrategy(strategy).invest(amountToLend);
+        }
+    }
+
+    function recallMntfromStrategy(uint256 _amount) internal /*onlyOwner*/ {
+        require(strategy != address(0), "Strategy not set");
+        require(totalLentToStrategy >= _amount, "Not enough lent to strategy");
+        uint256 _wmntOut = IStrategyStMnt(strategy).poolCallWithdraw(_amount);
+        require(_wmntOut >= _amount, "Withdrawn amount is less than requested");
+
+        totalLentToStrategy -= _wmntOut;
+    }
+
+    function report(
+        uint256 _profit,
+        uint256 _loss,
+        uint256 _newTotalDebt
+    ) external {
+        require(msg.sender == strategy, "Not a trusted strategy");
+
+        // Aggiorna il debito totale
+        totalLentToStrategy = _newTotalDebt;
+
+        // Se c'è stato un profitto, lo aggiungiamo alla contabilità.
+        // Questo aumenta il valore delle quote di tutti gli LP.
+        if (_profit > 0) {
+            balances[0] += _profit;
+        }
+
+        // Se c'è stata una perdita, la sottraiamo.
+        if (_loss > 0) {
+            balances[0] -= _loss;
+        }
     }
 }
-

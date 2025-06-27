@@ -94,6 +94,16 @@ contract StrategyStMnt {
         return _shares;
     }
 
+
+
+    function poolCallWithdraw(uint256 _amount) external returns (uint256) {
+        uint256 _sharesWithdrawn = convertWmnttoStmnt(_amount);
+        uint256 _wantOut = _withdrawFromVault(_sharesWithdrawn);
+        require(_wantOut >= _amount, "Withdrawn amount is less than requested");
+        return _wantOut;
+
+    }
+
     function _withdrawFromVault(uint256 _shares) private returns (uint256) {
         require(_shares > 0, "Shares must be greater than zero");
         uint wantOut = stVault.withdraw(_shares, address(this), 0);
@@ -106,6 +116,13 @@ contract StrategyStMnt {
     ) private view returns (uint256) {
         uint256 _mntconverted = (stVault.pricePerShare() * _amount) / 1e18;
         return _mntconverted;
+    }
+
+    function convertWmnttoStmnt(
+        uint256 _amount
+    ) private view returns (uint256) {
+        uint256 _stMntConverted = (_amount * 1e18) / stVault.pricePerShare();
+        return _stMntConverted;
     }
 
     function _report() private returns (uint256) {
