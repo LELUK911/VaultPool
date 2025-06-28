@@ -515,4 +515,7 @@ contract StableSwap is ERC20 {
             balances[0] -= _loss;
         }
     }
+
+
+    
 }
