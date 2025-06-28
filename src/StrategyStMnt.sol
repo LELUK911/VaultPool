@@ -60,30 +60,6 @@ contract StrategyStMnt {
     uint public balanceMNTTGivenPool;
 
     //?FUNZIONE PER PRENDERE MNT DAL POOL
-    /*
-    function _requestMNTtoPool() private returns (uint256) {
-        uint256 _poolWantBalance = pool.balances(0); // 0 è l'indice di wmnt
-        uint256 _balanceInStrategy = pool.balanceInStrategy(0); // 0 è l'indice di wmnt
-
-        //? CI SERVE SOLO IL 60 % DELLA LIQUIDITÀ TOTALE
-        uint256 _amountToRequest = (_poolWantBalance +
-            _balanceInStrategy *
-            60) / 100;
-        if (balanceMNTTGivenPool >= _amountToRequest) {
-            _amountToRequest = 0; // Non abbiamo bisogno di richiedere nulla
-        } else {
-            _amountToRequest - balanceMNTTGivenPool;
-        }
-
-        IERC20(want).safeTransferFrom(
-            address(pool),
-            address(this),
-            _amountToRequest
-        );
-        balanceMNTTGivenPool += _amountToRequest;
-        //! qui dovro aggiornare questo valore anche nel contratto della pool
-        return _amountToRequest;
-    }*/
 
     uint256 private balanceSharesInVault;
 
@@ -94,14 +70,16 @@ contract StrategyStMnt {
         return _shares;
     }
 
-
+    function invest(uint256 _amountToLend) external  {
+        require(_amountToLend >= IERC20(want).balanceOf(address(this)), "Insufficient balance to lend");
+        _depositToVault();
+    }
 
     function poolCallWithdraw(uint256 _amount) external returns (uint256) {
         uint256 _sharesWithdrawn = convertWmnttoStmnt(_amount);
         uint256 _wantOut = _withdrawFromVault(_sharesWithdrawn);
         require(_wantOut >= _amount, "Withdrawn amount is less than requested");
         return _wantOut;
-
     }
 
     function _withdrawFromVault(uint256 _shares) private returns (uint256) {
@@ -125,26 +103,70 @@ contract StrategyStMnt {
         return _stMntConverted;
     }
 
+
+
+    uint24 public boostFee = 3000; // 30% di boost fee 
+
+    function setBoostFee(uint24 _boostFee) external {
+        require(_boostFee <= 10000, "Boost fee cannot exceed 100%");
+        boostFee = _boostFee;
+    }
+
+    address public stMntStrategy;
+
+    function setStMntStrategy(address _stMntStrategy) external {
+        require(_stMntStrategy != address(0), "Invalid stMnt strategy address");
+        stMntStrategy = _stMntStrategy;
+    }
+
+
+
+    function claimBoostFee(uint256 _profit) private returns (uint256) {
+        //? Calcoliamo il boost fee
+        uint256 _boostFee = (_profit * boostFee) / 10000;
+        require(_boostFee <= _profit, "Boost fee exceeds profit");
+        //? Dobbiamo inviare il boost fee al vault
+        IERC20(want).safeTransfer(address(stVault), _boostFee);
+        return _boostFee;
+    }
+
+
+
+
     function _report() private returns (uint256) {
         //? Dobbiamo calcolare il profitto e le perdite
         uint256 _wantBalance = balanceWmnt();
         uint256 _stMntBalance = balanceStMnt();
         uint256 _wantInStMNt = convertStmntToWmnt(_stMntBalance);
+        uint256 _loss = 0;
+        uint256 _profit = 0;
+        uint256 _boostFee = 0;
 
         //? Calcolo del profitto e delle perdite
-        uint256 _profit = (_wantBalance + _wantInStMNt) - balanceMNTTGivenPool;
+        if (balanceMNTTGivenPool > _wantBalance + _wantInStMNt) {
+            _loss = balanceMNTTGivenPool - (_wantBalance + _wantInStMNt);
+            require(_loss <= balanceMNTTGivenPool, "Loss exceeds pool balance");
+            balanceMNTTGivenPool -= _loss;
+        } else {
+            _profit = (_wantBalance + _wantInStMNt) - balanceMNTTGivenPool;
+            _boostFee = claimBoostFee(_profit); //! qui inviamo le boost fee al vault 
+            require(_boostFee <= _profit, "Boost fee exceeds profit");
+            _profit -= _boostFee; //? Sottraiamo il boost fee dal profitto
+            balanceMNTTGivenPool += _profit ;
+        }
 
-        balanceMNTTGivenPool += _profit;
 
-        //? Aggiorniamo i valori nel vault 
-        //! ANCORA DA IMPLEMENTARE
-        //pool.report(_profit, _loss, _shares);
+
+        //? mettiamo qui la logica per portare i profitti nell vault come boost 
+
+
+        //? Aggiorniamo i valori nel vault
+        pool.report(_profit, _loss, balanceMNTTGivenPool);
 
         return _profit;
     }
 
     function harvest() external returns (uint256 _profit) {
-
         //? Poi depositiamo in vault
         _depositToVault();
 

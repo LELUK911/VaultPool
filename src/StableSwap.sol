@@ -481,7 +481,7 @@ contract StableSwap is ERC20 {
 
             // Chiama la funzione di investimento sulla strategy
             //!PER ORA TENIAMO UN APPROCCIO MANUALE, DEVO CHIAMARE L'HARVEST IO, COSI IMPLEMENTO IL MECCANISCO DI DEGRADAZIONE PER EVITARE EXPLOIT
-            //TODO IStrategy(strategy).invest(amountToLend);
+            IStrategyStMnt(strategy).invest(amountToLend);
         }
     }
 

@@ -27,7 +27,6 @@ interface IStableSwap is IERC20 {
      */
     function balances(uint256 index) external view returns (uint256);
 
-
     function balanceInStrategy(uint256 index) external view returns (uint256);
 
     // =================================================================
@@ -103,4 +102,10 @@ interface IStableSwap is IERC20 {
         uint256 i,
         uint256 minAmountOut
     ) external returns (uint256 amountOut);
+
+    function report(
+        uint256 _profit,
+        uint256 _loss,
+        uint256 _newTotalDebt
+    ) external;
 }
