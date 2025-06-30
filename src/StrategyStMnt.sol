@@ -9,6 +9,8 @@ import {IStableSwap} from "./interfaces/IstableSwap.sol";
 
 import {IVault} from "./interfaces/IVault.sol";
 
+import {console} from "forge-std/console.sol";
+
 contract StrategyStMnt {
     using SafeERC20 for IERC20;
 
@@ -65,13 +67,19 @@ contract StrategyStMnt {
 
     function _depositToVault() private returns (uint256) {
         uint256 _wantBalance = balanceWmnt();
+        if (_wantBalance == 0) {
+            return 0; // Nothing to deposit
+        }
         uint256 _shares = stVault.deposit(_wantBalance, address(this));
         balanceSharesInVault += _shares;
         return _shares;
     }
 
-    function invest(uint256 _amountToLend) external  {
-        require(_amountToLend >= IERC20(want).balanceOf(address(this)), "Insufficient balance to lend");
+    function invest(uint256 _amountToLend) external {
+        require(
+            _amountToLend >= IERC20(want).balanceOf(address(this)),
+            "Insufficient balance to lend"
+        );
         _depositToVault();
     }
 
@@ -103,9 +111,7 @@ contract StrategyStMnt {
         return _stMntConverted;
     }
 
-
-
-    uint24 public boostFee = 3000; // 30% di boost fee 
+    uint24 public boostFee = 3000; // 30% di boost fee
 
     function setBoostFee(uint24 _boostFee) external {
         require(_boostFee <= 10000, "Boost fee cannot exceed 100%");
@@ -119,27 +125,35 @@ contract StrategyStMnt {
         stMntStrategy = _stMntStrategy;
     }
 
-
-
     function claimBoostFee(uint256 _profit) private returns (uint256) {
         //? Calcoliamo il boost fee
         uint256 _boostFee = (_profit * boostFee) / 10000;
         require(_boostFee <= _profit, "Boost fee exceeds profit");
         //? Dobbiamo inviare il boost fee al vault
-        IERC20(want).safeTransfer(address(stVault), _boostFee);
+
+        //! devo prima prelevare sti fondi dal vault
+        uint256 _sharesToWithdraw = convertWmnttoStmnt(_boostFee);
+        uint256 _wantOut = _withdrawFromVault(_sharesToWithdraw);
+        require(
+            _wantOut >= _boostFee * 9999 / 10000,
+            "Withdrawn amount is less than boost fee"
+        );
+
+        console.log("Boost FEE ->", _boostFee);
+        console.log("Want Out ->", _wantOut);
+
+
+
+
+        IERC20(want).safeTransfer(address(stVault), _boostFee-1);
         return _boostFee;
     }
 
-
-
-
-    function _report() private returns (uint256) {
+    function _report() private returns (uint256 _profit, uint256 _loss) {
         //? Dobbiamo calcolare il profitto e le perdite
         uint256 _wantBalance = balanceWmnt();
         uint256 _stMntBalance = balanceStMnt();
         uint256 _wantInStMNt = convertStmntToWmnt(_stMntBalance);
-        uint256 _loss = 0;
-        uint256 _profit = 0;
         uint256 _boostFee = 0;
 
         //? Calcolo del profitto e delle perdite
@@ -149,38 +163,30 @@ contract StrategyStMnt {
             balanceMNTTGivenPool -= _loss;
         } else {
             _profit = (_wantBalance + _wantInStMNt) - balanceMNTTGivenPool;
-            _boostFee = claimBoostFee(_profit); //! qui inviamo le boost fee al vault 
+            _boostFee = claimBoostFee(_profit); //! qui inviamo le boost fee al vault
             require(_boostFee <= _profit, "Boost fee exceeds profit");
             _profit -= _boostFee; //? Sottraiamo il boost fee dal profitto
-            balanceMNTTGivenPool += _profit ;
+            balanceMNTTGivenPool += _profit;
         }
 
-
-
-        //? mettiamo qui la logica per portare i profitti nell vault come boost 
-
+        //? mettiamo qui la logica per portare i profitti nell vault come boost
 
         //? Aggiorniamo i valori nel vault
         pool.report(_profit, _loss, balanceMNTTGivenPool);
-
-        return _profit;
     }
 
-    function harvest() external returns (uint256 _profit) {
+    function harvest() external returns (uint256 _profit, uint256 _loss) {
         //? Poi depositiamo in vault
         _depositToVault();
 
         //? Infine facciamo il report
-        _profit = _report();
-
-        return _profit;
+        (_profit, _loss) = _report();
     }
 
-
-     function estimatedTotalAssets() external view returns (uint256){
+    function estimatedTotalAssets() external view returns (uint256) {
         uint256 _wantBalance = balanceWmnt();
         uint256 _stMntBalance = balanceStMnt();
         uint256 _wantInStMNt = convertStmntToWmnt(_stMntBalance);
         return _wantBalance + _wantInStMNt + balanceMNTTGivenPool;
-     }
+    }
 }

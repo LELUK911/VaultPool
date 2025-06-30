@@ -207,7 +207,7 @@ contract SwapTest is Test {
         vm.stopPrank();
     }
 
-    /*
+    
     function testFirstSetup() public {
         setUpPoolAndStrategy();
     }
@@ -304,7 +304,6 @@ contract SwapTest is Test {
 
         console.log(unicode"\n=== SWAP 1: WMNT → stMNT ===");
         uint256 bobWMNTBefore = WMNT.balanceOf(bob);
-        uint256 bobStMNTBefore = stMNT.balanceOf(bob);
         uint256 poolWMNTBefore = WMNT.balanceOf(address(pool));
         uint256 poolStMNTBefore = stMNT.balanceOf(address(pool));
 
@@ -340,7 +339,6 @@ contract SwapTest is Test {
         // =================================================================
 
         console.log(unicode"\n=== SWAP 2: stMNT → WMNT ===");
-        uint256 bobWMNTBefore2 = WMNT.balanceOf(bob);
         uint256 bobStMNTBefore2 = stMNT.balanceOf(bob);
         uint256 poolWMNTBefore2 = WMNT.balanceOf(address(pool));
         uint256 poolStMNTBefore2 = stMNT.balanceOf(address(pool));
@@ -378,9 +376,6 @@ contract SwapTest is Test {
 
         console.log(unicode"\n=== SWAP 3: Large WMNT → stMNT ===");
         uint256 bobWMNTBefore3 = WMNT.balanceOf(bob);
-        uint256 bobStMNTBefore3 = stMNT.balanceOf(bob);
-        uint256 poolWMNTBefore3 = WMNT.balanceOf(address(pool));
-        uint256 poolStMNTBefore3 = stMNT.balanceOf(address(pool));
         uint256 virtualPriceBefore3 = pool.getVirtualPrice();
 
         // Bob swaps 10 WMNT for stMNT
@@ -414,10 +409,7 @@ contract SwapTest is Test {
         // =================================================================
 
         console.log(unicode"\n=== SWAP 4: Large stMNT → WMNT ===");
-        uint256 bobWMNTBefore4 = WMNT.balanceOf(bob);
         uint256 bobStMNTBefore4 = stMNT.balanceOf(bob);
-        uint256 poolWMNTBefore4 = WMNT.balanceOf(address(pool));
-        uint256 poolStMNTBefore4 = stMNT.balanceOf(address(pool));
         uint256 virtualPriceBefore4 = pool.getVirtualPrice();
 
         // Bob sells 8 stMNT for WMNT
@@ -672,8 +664,6 @@ contract SwapTest is Test {
         console.log("Fees earned:", feesEarned);
 
         // Record state before Alice's withdrawal
-        uint256 aliceWMNTBeforeWithdraw = WMNT.balanceOf(alice);
-        uint256 aliceStMNTBeforeWithdraw = stMNT.balanceOf(alice);
         uint256 virtualPriceBeforeWithdraw = pool.getVirtualPrice();
 
         // Alice withdraws her liquidity
@@ -778,15 +768,6 @@ contract SwapTest is Test {
         console.log(" Virtual price appreciation confirmed!");
     }
 
-    // =================================================================
-    // 🛠️ HELPER FUNCTION
-    // =================================================================
-
-   */
-
-    // =================================================================
-    // 🔧 FIXED ONE TOKEN WITHDRAWAL TESTS
-    // =================================================================
 
     function testRemoveOneTokenSimple() public {
         setUpPoolAndStrategy();

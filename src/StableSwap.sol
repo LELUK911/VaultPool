@@ -650,7 +650,7 @@ contract StableSwap is
 
     function lendToStrategy()
         external
-        onlyRole(KEEPER_ROLE | STRATEGY_MANAGER_ROLE | GOVERNANCE_ROLE)
+        onlyKeeper()
     {
         require(strategy != address(0), "Strategy not set");
 
