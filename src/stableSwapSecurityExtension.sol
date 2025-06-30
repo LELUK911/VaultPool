@@ -228,7 +228,7 @@ contract StableSwapSecurityExtensions{
 
 
 
-    modifier onlyGovernance() {
+    modifier onlyGovernance() virtual  {
         //require(msg.sender == governance, "Not governance");
         _;
     }

@@ -7,6 +7,10 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IStrategyStMnt} from "./interfaces/IStrategy.sol";
 import {StableSwapSecurityExtensions} from "./stableSwapSecurityExtension.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+
+import {console} from "forge-std/console.sol";
 
 library Math {
     function abs(uint256 x, uint256 y) internal pure returns (uint256) {
@@ -14,8 +18,32 @@ library Math {
     }
 }
 
-contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
+contract StableSwap is
+    ERC20,
+    StableSwapSecurityExtensions,
+    ReentrancyGuard,
+    AccessControl,
+    Pausable
+{
     using SafeERC20 for IERC20;
+
+    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
+
+    /// @notice Governance role - can update parameters and strategy
+    bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
+
+    /// @notice Guardian role - can pause/unpause, emergency functions
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
+
+    /// @notice Strategy Manager - can call strategy functions
+    bytes32 public constant STRATEGY_MANAGER_ROLE =
+        keccak256("STRATEGY_MANAGER_ROLE");
+
+    /// @notice Keeper role - can call harvest and maintenance functions
+    bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
+
+    /// @notice Strategy role - only the strategy contract can report
+    bytes32 public constant STRATEGY_ROLE = keccak256("STRATEGY_ROLE");
 
     // Number of tokens
     uint256 internal constant N = 2;
@@ -45,9 +73,139 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
     uint256[N] public balanceInStrategy;
 
     constructor(
-        address[N] memory _tokens
+        address[N] memory _tokens,
+        address _admin,
+        address _governance,
+        address _guardian
     ) ERC20("StableSwap MNT/stMNT", "SS-MNT/stMNT") {
+        require(_admin != address(0), "Invalid admin address");
+        require(_governance != address(0), "Invalid governance address");
+        require(_guardian != address(0), "Invalid guardian address");
+
         tokens = _tokens;
+
+        // Setup roles
+        _grantRole(ADMIN_ROLE, _admin);
+        _grantRole(GOVERNANCE_ROLE, _governance);
+        _grantRole(GUARDIAN_ROLE, _guardian);
+
+        // Admin can grant all roles
+        _setRoleAdmin(GOVERNANCE_ROLE, ADMIN_ROLE);
+        _setRoleAdmin(GUARDIAN_ROLE, ADMIN_ROLE);
+        _setRoleAdmin(STRATEGY_MANAGER_ROLE, ADMIN_ROLE);
+        _setRoleAdmin(KEEPER_ROLE, ADMIN_ROLE);
+        _setRoleAdmin(STRATEGY_ROLE, ADMIN_ROLE);
+
+        // Initialize security extensions
+        lastReport = block.timestamp;
+    }
+
+    // =================================================================
+    // 🔒 ACCESS CONTROL MODIFIERS
+    // =================================================================
+
+    /// @notice Only admin can call
+    modifier onlyAdmin() {
+        require(
+            hasRole(ADMIN_ROLE, msg.sender),
+            "AccessControl: sender must be admin"
+        );
+        _;
+    }
+
+    /// @notice Only governance can call
+    modifier onlyGovernance() override {
+        require(
+            hasRole(GOVERNANCE_ROLE, msg.sender),
+            "AccessControl: sender must be governance"
+        );
+        _;
+    }
+
+    /// @notice Only guardian can call
+    modifier onlyGuardian() {
+        require(
+            hasRole(GUARDIAN_ROLE, msg.sender),
+            "AccessControl: sender must be guardian"
+        );
+        _;
+    }
+
+    /// @notice Guardian or governance can call
+    modifier onlyGuardianOrGovernance() {
+        require(
+            hasRole(GUARDIAN_ROLE, msg.sender) ||
+                hasRole(GOVERNANCE_ROLE, msg.sender),
+            "AccessControl: sender must be guardian or governance"
+        );
+        _;
+    }
+
+    /// @notice Strategy manager can call
+    modifier onlyStrategyManager() {
+        require(
+            hasRole(STRATEGY_MANAGER_ROLE, msg.sender),
+            "AccessControl: sender must be strategy manager"
+        );
+        _;
+    }
+
+    /// @notice Only keeper can call
+    modifier onlyKeeper() {
+        require(
+            hasRole(KEEPER_ROLE, msg.sender),
+            "AccessControl: sender must be keeper"
+        );
+        _;
+    }
+
+    /// @notice Only strategy contract can call
+    modifier onlyStrategy() {
+        require(
+            hasRole(STRATEGY_ROLE, msg.sender),
+            "AccessControl: sender must be strategy"
+        );
+        _;
+    }
+
+    /**
+     * @notice Grant a role to an account
+     * @param role The role to grant
+     * @param account The account to grant the role to
+     */
+    function grantRole(
+        bytes32 role,
+        address account
+    ) public override onlyAdmin {
+        _grantRole(role, account);
+        emit RoleGranted(role, account, msg.sender);
+    }
+
+    /**
+     * @notice Revoke a role from an account
+     * @param role The role to revoke
+     * @param account The account to revoke the role from
+     */
+    function revokeRole(
+        bytes32 role,
+        address account
+    ) public override onlyAdmin {
+        _revokeRole(role, account);
+        emit RoleRevoked(role, account, msg.sender);
+    }
+
+    /**
+     * @notice Emergency function to pause all operations
+     */
+    function pause() external onlyGuardianOrGovernance {
+        _pause();
+    }
+
+    /**
+     * @notice Unpause operations (only governance for safety)
+     */
+    function unpause() external onlyGovernance {
+        _unpause();
     }
 
     // Return precision-adjusted balances, adjusted to 18 decimals
@@ -247,8 +405,8 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
         uint256 i,
         uint256 j,
         uint256 dx,
-        uint256 minDy /* nonReentrant */
-    ) external nonReentrant rateLimited sanityCheck returns (uint256 dy) {
+        uint256 minDy 
+    ) external nonReentrant   returns (uint256 dy) { //rateLimited sanityCheck  //! non so se lo voglio davvero qui
         require(!emergencyShutdown, "Emergency shutdown active");
         require(i != j, "i = j");
 
@@ -291,18 +449,19 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
         require(!emergencyShutdown, "Emergency shutdown active");
 
         // Check deposit size limits
-        uint256 totalDeposit = amounts[0] + amounts[1];
-        require(totalDeposit <= _freeFunds() / 10, "Deposit too large");
+        //! se il deposito è ancora zero fallisce sempre, la devo rivedere dopo
+        //uint256 totalDeposit = amounts[0] + amounts[1];
+        //require(totalDeposit <= _freeFunds() / 10, "Deposit too large");
 
         // calculate current liquidity d0
         uint256 _totalSupply = totalSupply();
         uint256 d0;
         uint256[N] memory old_xs = _xpWithFreeFunds();
         //uint256[N] memory old_xs = _xp();
+
         if (_totalSupply > 0) {
             d0 = _getD(old_xs);
         }
-
         // Transfer tokens in
         uint256[N] memory new_xs;
         for (uint256 i; i < N; ++i) {
@@ -315,9 +474,10 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
                 );
                 new_xs[i] = old_xs[i] + amount * multipliers[i];
             } else {
-                new_xs[i] = old_xs[i];
+              new_xs[i] = old_xs[i];
             }
         }
+
 
         // Calculate new liquidity d1
         uint256 d1 = _getD(new_xs);
@@ -352,6 +512,7 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
         }
         require(shares >= minShares, "shares < min");
         _mint(msg.sender, shares);
+        
     }
 
     function removeLiquidity(
@@ -483,11 +644,14 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
     address public strategy;
     uint256 public totalLentToStrategy; // Il "debito" che la Strategy ha verso la Pool
 
-    function setStrategy(address _strategy) external /*onlyOwner*/ {
+    function setStrategy(address _strategy) external onlyStrategyManager {
         strategy = _strategy;
     }
 
-    function lendToStrategy() external /*onlyOwner*/ {
+    function lendToStrategy()
+        external
+        onlyRole(KEEPER_ROLE | STRATEGY_MANAGER_ROLE | GOVERNANCE_ROLE)
+    {
         require(strategy != address(0), "Strategy not set");
 
         // Calcola il 30% del saldo di MNT come buffer
@@ -593,15 +757,20 @@ contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
     }
 
     function _xpWithFreeFunds() internal view returns (uint256[N] memory xp) {
-        // For MNT: use free funds calculation
         uint256 totalMNT = balances[0] + totalLentToStrategy;
-        uint256 lockedMNT = (_calculateLockedProfit() * totalMNT) /
-            _totalAssets();
-        uint256 freeMNT = totalMNT > lockedMNT
-            ? totalMNT - lockedMNT
-            : totalMNT;
+        uint256 freeMNT = totalMNT; // Default: all MNT is free
+
+  
+        uint256 totalAssets = _totalAssets();
+        uint256 lockedProfit = _calculateLockedProfit();
+
+        // 🛡️ SAFETY: Check for division by zero
+        if (totalAssets > 0 && lockedProfit > 0 && totalMNT > 0) {
+            uint256 lockedMNT = (lockedProfit * totalMNT) / totalAssets;
+            freeMNT = totalMNT > lockedMNT ? totalMNT - lockedMNT : totalMNT;
+        }
 
         xp[0] = freeMNT * multipliers[0];
-        xp[1] = balances[1] * multipliers[1]; // stMNT unchanged
+        xp[1] = balances[1] * multipliers[1];
     }
 }
