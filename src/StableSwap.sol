@@ -5,6 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IStrategyStMnt} from "./interfaces/IStrategy.sol";
+import {StableSwapSecurityExtensions} from "./stableSwapSecurityExtension.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 library Math {
     function abs(uint256 x, uint256 y) internal pure returns (uint256) {
@@ -12,11 +14,11 @@ library Math {
     }
 }
 
-contract StableSwap is ERC20 {
+contract StableSwap is ERC20, StableSwapSecurityExtensions, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // Number of tokens
-    uint256 private constant N = 2;
+    uint256 internal constant N = 2;
     // Amplification coefficient multiplied by N^(N - 1)
     // Higher value makes the curve more flat
     // Lower value makes the curve more like constant product AMM
@@ -224,8 +226,9 @@ contract StableSwap is ERC20 {
 
     // Estimate value of 1 share
     // How many tokens is one share worth?
-    function getVirtualPrice() external view returns (uint256) {
-        uint256 d = _getD(_xp());
+    function getVirtualPrice() public view returns (uint256) {
+        //uint256 d = _getD(_xp());
+        uint256 d = _getD(_xpWithFreeFunds()); // Use free funds, not total
         uint256 _totalSupply = totalSupply();
         if (_totalSupply > 0) {
             return (d * 10 ** decimals()) / _totalSupply;
@@ -245,7 +248,8 @@ contract StableSwap is ERC20 {
         uint256 j,
         uint256 dx,
         uint256 minDy /* nonReentrant */
-    ) external returns (uint256 dy) {
+    ) external nonReentrant rateLimited sanityCheck returns (uint256 dy) {
+        require(!emergencyShutdown, "Emergency shutdown active");
         require(i != j, "i = j");
 
         IERC20(tokens[i]).transferFrom(msg.sender, address(this), dx);
@@ -283,11 +287,18 @@ contract StableSwap is ERC20 {
     function addLiquidity(
         uint256[N] calldata amounts,
         uint256 minShares
-    ) external returns (uint256 shares) {
+    ) external nonReentrant rateLimited sanityCheck returns (uint256 shares) {
+        require(!emergencyShutdown, "Emergency shutdown active");
+
+        // Check deposit size limits
+        uint256 totalDeposit = amounts[0] + amounts[1];
+        require(totalDeposit <= _freeFunds() / 10, "Deposit too large");
+
         // calculate current liquidity d0
         uint256 _totalSupply = totalSupply();
         uint256 d0;
-        uint256[N] memory old_xs = _xp();
+        uint256[N] memory old_xs = _xpWithFreeFunds();
+        //uint256[N] memory old_xs = _xp();
         if (_totalSupply > 0) {
             d0 = _getD(old_xs);
         }
@@ -346,7 +357,20 @@ contract StableSwap is ERC20 {
     function removeLiquidity(
         uint256 shares,
         uint256[N] calldata minAmountsOut
-    ) external returns (uint256[N] memory amountsOut) {
+    )
+        external
+        nonReentrant
+        rateLimited
+        sanityCheck
+        returns (uint256[N] memory amountsOut)
+    {
+        require(!emergencyShutdown, "Emergency shutdown active");
+
+        // Limit withdrawal size
+        require(shares <= totalSupply() / 20, "Withdrawal too large");
+
+        // Use free funds for calculations
+        //uint256 freeFunds = _freeFunds(); // ❌ ADD THIS
         uint256 _totalSupply = totalSupply();
 
         // Calcola la quota di MNT a cui l'utente ha diritto
@@ -500,6 +524,9 @@ contract StableSwap is ERC20 {
         uint256 _newTotalDebt
     ) external {
         require(msg.sender == strategy, "Not a trusted strategy");
+        require(_profit == 0 || _loss == 0, "Cannot have both profit and loss");
+
+        _updateLockedProfit(_profit, _loss);
 
         // Aggiorna il debito totale
         totalLentToStrategy = _newTotalDebt;
@@ -516,6 +543,65 @@ contract StableSwap is ERC20 {
         }
     }
 
+    /**
+     * @notice Returns total assets including strategy debt
+     * @dev This should be implemented in the main contract
+     * @return Total assets under management
+     */
+    function _totalAssets() internal view returns (uint256) {
+        return IStrategyStMnt(strategy).estimatedTotalAssets() + balances[0];
+    }
 
-    
+    /**
+     * @notice Performs a health check and returns results
+     * @return isHealthy Whether all sanity checks pass
+     */
+    function performHealthCheck() external view returns (bool isHealthy) {
+        return false; //_performSanityCheck();
+    }
+
+    /// @notice Validates balance changes don't exceed loss threshold
+    modifier sanityCheck() {
+        uint256 balanceBefore = _totalAssets();
+        _;
+        uint256 balanceAfter = _totalAssets();
+
+        if (balanceAfter < balanceBefore) {
+            uint256 loss = balanceBefore - balanceAfter;
+            uint256 maxAllowedLoss = (balanceBefore * maxLossThreshold) / 10000;
+            require(loss <= maxAllowedLoss, "Loss exceeds threshold");
+        }
+    }
+
+    /**
+     * @notice Returns free funds available for operations (total - locked profit)
+     * @dev This is used instead of raw totalAssets for pricing calculations
+     * @return Available funds considering locked profit degradation
+     */
+    function _freeFunds() internal view returns (uint256) {
+        uint256 total = _totalAssets();
+        uint256 locked = _calculateLockedProfit();
+        return total > locked ? total - locked : 0;
+    }
+
+    /**
+     * @notice Returns the current free funds available
+     * @return Free funds (total assets minus locked profit)
+     */
+    function getFreeFunds() external view returns (uint256) {
+        return _freeFunds();
+    }
+
+    function _xpWithFreeFunds() internal view returns (uint256[N] memory xp) {
+        // For MNT: use free funds calculation
+        uint256 totalMNT = balances[0] + totalLentToStrategy;
+        uint256 lockedMNT = (_calculateLockedProfit() * totalMNT) /
+            _totalAssets();
+        uint256 freeMNT = totalMNT > lockedMNT
+            ? totalMNT - lockedMNT
+            : totalMNT;
+
+        xp[0] = freeMNT * multipliers[0];
+        xp[1] = balances[1] * multipliers[1]; // stMNT unchanged
+    }
 }

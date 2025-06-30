@@ -175,4 +175,12 @@ contract StrategyStMnt {
 
         return _profit;
     }
+
+
+     function estimatedTotalAssets() external view returns (uint256){
+        uint256 _wantBalance = balanceWmnt();
+        uint256 _stMntBalance = balanceStMnt();
+        uint256 _wantInStMNt = convertStmntToWmnt(_stMntBalance);
+        return _wantBalance + _wantInStMNt + balanceMNTTGivenPool;
+     }
 }

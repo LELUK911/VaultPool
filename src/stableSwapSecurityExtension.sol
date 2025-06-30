@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IStrategyStMnt} from "./interfaces/IStrategy.sol";
+
+
 // ================================
 // SECURITY MECHANISMS TO ADD TO STABLESWAP
 // ================================
 
-contract StableSwapSecurityExtensions {
+contract StableSwapSecurityExtensions{
     // =================================================================
     // SANITY CHECK VARIABLES
     // =================================================================
@@ -16,13 +21,15 @@ contract StableSwapSecurityExtensions {
 
     /// @notice Maximum allowed loss per operation (in basis points)
     /// @dev Default: 100 = 1%, prevents catastrophic losses
-    uint256 public maxLossThreshold = 100; // 1%
+
 
     /// @notice Minimum time between major operations to prevent flash loan attacks
     uint256 public cooldownPeriod = 1 hours;
 
     /// @notice Last time a major operation was performed
     mapping(address => uint256) public lastOperationTime;
+
+     uint256 internal maxLossThreshold = 100; // 1%
 
     // =================================================================
     // LOCKED PROFIT DEGRADATION (Anti-Sandwich/MEV Protection)
@@ -54,6 +61,10 @@ contract StableSwapSecurityExtensions {
     );
     event OperationCooledDown(address user, uint256 timestamp);
 
+
+  
+
+
     // =================================================================
     // MODIFIERS
     // =================================================================
@@ -68,18 +79,7 @@ contract StableSwapSecurityExtensions {
         _;
     }
 
-    /// @notice Validates balance changes don't exceed loss threshold
-    modifier sanityCheck() {
-        uint256 balanceBefore = _totalAssets();
-        _;
-        uint256 balanceAfter = _totalAssets();
 
-        if (balanceAfter < balanceBefore) {
-            uint256 loss = balanceBefore - balanceAfter;
-            uint256 maxAllowedLoss = (balanceBefore * maxLossThreshold) / 10000;
-            require(loss <= maxAllowedLoss, "Loss exceeds threshold");
-        }
-    }
 
     // =================================================================
     // CORE SECURITY FUNCTIONS
@@ -102,16 +102,7 @@ contract StableSwapSecurityExtensions {
         return (lockedProfit * lockedFundsRatio) / DEGRADATION_COEFFICIENT;
     }
 
-    /**
-     * @notice Returns free funds available for operations (total - locked profit)
-     * @dev This is used instead of raw totalAssets for pricing calculations
-     * @return Available funds considering locked profit degradation
-     */
-    function _freeFunds() internal view returns (uint256) {
-        uint256 total = _totalAssets();
-        uint256 locked = _calculateLockedProfit();
-        return total > locked ? total - locked : 0;
-    }
+
 
     /**
      * @notice Updates locked profit after strategy reports
@@ -135,81 +126,24 @@ contract StableSwapSecurityExtensions {
         lastReport = block.timestamp;
         emit LockedProfitUpdated(lockedProfit, block.timestamp);
     }
-/** 
-    /**
-     * @notice Comprehensive sanity check for the entire system
-     * @dev Verifies that accounting matches reality across all components
-     * @return isHealthy True if all checks pass
-     */
-    function _performSanityCheck() internal view returns (bool isHealthy) {
-        // Check 1: Verify total supply math
-        uint256 virtualPrice = getVirtualPrice();
-        uint256 calculatedTotalValue = (totalSupply() * virtualPrice) / 1e18;
-        uint256 actualTotalAssets = _totalAssets();
 
-        if (
-            _abs(calculatedTotalValue, actualTotalAssets) >
-            (actualTotalAssets * 50) / 10000
-        ) {
-            // 0.5% tolerance
-            emit SanityCheckFailed(
-                "Virtual price mismatch",
-                calculatedTotalValue,
-                actualTotalAssets
-            );
-            return false;
-        }
+    
 
-        // Check 2: Verify strategy debt accounting
-        if (strategy != address(0)) {
-            uint256 claimedAssets = IStrategyStMnt(strategy)
-                .estimatedTotalAssets();
-            if (
-                _abs(totalLentToStrategy, claimedAssets) >
-                (totalLentToStrategy * 100) / 10000
-            ) {
-                // 1% tolerance
-                emit SanityCheckFailed(
-                    "Strategy debt mismatch",
-                    totalLentToStrategy,
-                    claimedAssets
-                );
-                return false;
-            }
-        }
+    bool internal emergencyShutdown = false;     
 
-        // Check 3: Verify individual token balances
-        for (uint256 i = 0; i < N; ++i) {
-            uint256 contractBalance = IERC20(tokens[i]).balanceOf(
-                address(this)
-            );
-            uint256 expectedMinBalance = (balances[i] * 95) / 100; // Allow 5% variance for rounding
-
-            if (contractBalance < expectedMinBalance) {
-                emit SanityCheckFailed(
-                    "Token balance too low",
-                    balances[i],
-                    contractBalance
-                );
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     /**
      * @notice Emergency function to pause all operations if sanity checks fail
      * @dev Can only be called by guardian or governance, sets emergency flag
      */
     function emergencyPause() external {
-        require(
-            msg.sender == guardian || msg.sender == governance,
-            "Not authorized for emergency pause"
-        );
+        //require(
+        //    msg.sender == guardian || msg.sender == governance,
+        //    "Not authorized for emergency pause"
+        //);
 
         emergencyShutdown = true;
-        emit EmergencyShutdown(true);
+        //emit EmergencyShutdown(true);
     }
 
     // =================================================================
@@ -281,59 +215,21 @@ contract StableSwapSecurityExtensions {
         return _calculateLockedProfit();
     }
 
-    /**
-     * @notice Returns the current free funds available
-     * @return Free funds (total assets minus locked profit)
-     */
-    function getFreeFunds() external view returns (uint256) {
-        return _freeFunds();
-    }
+  
 
-    /**
-     * @notice Performs a health check and returns results
-     * @return isHealthy Whether all sanity checks pass
-     */
-    function performHealthCheck() external view returns (bool isHealthy) {
-        return _performSanityCheck();
-    }
 
     // =================================================================
     // UTILITY FUNCTIONS
     // =================================================================
 
-    /**
-     * @notice Calculates absolute difference between two numbers
-     * @param a First number
-     * @param b Second number
-     * @return Absolute difference
-     */
-    function _abs(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a >= b ? a - b : b - a;
-    }
 
-    /**
-     * @notice Returns total assets including strategy debt
-     * @dev This should be implemented in the main contract
-     * @return Total assets under management
-     */
-    function _totalAssets() internal view virtual returns (uint256);
 
-    // =================================================================
-    // PLACEHOLDER VARIABLES (should exist in main contract)
-    // =================================================================
 
-    // These should be defined in your main StableSwap contract:
-    // address public governance;
-    // address public guardian;
-    // bool public emergencyShutdown;
-    // uint256[N] public balances;
-    // address[N] public tokens;
-    // address public strategy;
-    // uint256 public totalLentToStrategy;
-    // uint256 constant N = 2;
+
+
 
     modifier onlyGovernance() {
-        require(msg.sender == governance, "Not governance");
+        //require(msg.sender == governance, "Not governance");
         _;
     }
 }
