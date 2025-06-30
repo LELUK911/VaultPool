@@ -521,14 +521,14 @@ contract StableSwap is
     )
         external
         nonReentrant
-        rateLimited
-        sanityCheck
+        //rateLimited
+        //sanityCheck
         returns (uint256[N] memory amountsOut)
     {
         require(!emergencyShutdown, "Emergency shutdown active");
 
-        // Limit withdrawal size
-        require(shares <= totalSupply() / 20, "Withdrawal too large");
+        // Limit withdrawal size //! non so se lo voglio davvero qui e in che limite
+        //require(shares <= totalSupply() / 20, "Withdrawal too large");
 
         // Use free funds for calculations
         //uint256 freeFunds = _freeFunds(); // ❌ ADD THIS
