@@ -80,20 +80,30 @@ contract StrategyStMnt {
             _amountToLend >= IERC20(want).balanceOf(address(this)),
             "Insufficient balance to lend"
         );
+        balanceMNTTGivenPool += _amountToLend;
         _depositToVault();
     }
 
     function poolCallWithdraw(uint256 _amount) external returns (uint256) {
+
         uint256 _sharesWithdrawn = convertWmnttoStmnt(_amount);
         uint256 _wantOut = _withdrawFromVault(_sharesWithdrawn);
         require(_wantOut >= _amount, "Withdrawn amount is less than requested");
+        IERC20(want).safeTransfer(address(pool), _wantOut);
         return _wantOut;
     }
 
     function _withdrawFromVault(uint256 _shares) private returns (uint256) {
         require(_shares > 0, "Shares must be greater than zero");
-        uint wantOut = stVault.withdraw(_shares, address(this), 0);
+        uint256 potenziaWantOut = convertStmntToWmnt(_shares);
+        balanceMNTTGivenPool -= potenziaWantOut;
         balanceSharesInVault -= _shares;
+        uint wantOut = stVault.withdraw(_shares, address(this), 0);
+        require(
+            wantOut >= potenziaWantOut,
+            "Withdrawn amount is less than requested"
+        );
+
         return wantOut;
     }
 
@@ -135,17 +145,12 @@ contract StrategyStMnt {
         uint256 _sharesToWithdraw = convertWmnttoStmnt(_boostFee);
         uint256 _wantOut = _withdrawFromVault(_sharesToWithdraw);
         require(
-            _wantOut >= _boostFee * 9999 / 10000,
+            _wantOut >= (_boostFee * 9999) / 10000,
             "Withdrawn amount is less than boost fee"
         );
 
-        console.log("Boost FEE ->", _boostFee);
-        console.log("Want Out ->", _wantOut);
 
-
-
-
-        IERC20(want).safeTransfer(address(stVault), _boostFee-1);
+        IERC20(want).safeTransfer(address(stVault), _boostFee - 1);
         return _boostFee;
     }
 
@@ -181,6 +186,7 @@ contract StrategyStMnt {
 
         //? Infine facciamo il report
         (_profit, _loss) = _report();
+
     }
 
     function estimatedTotalAssets() external view returns (uint256) {

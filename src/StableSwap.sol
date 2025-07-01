@@ -405,8 +405,9 @@ contract StableSwap is
         uint256 i,
         uint256 j,
         uint256 dx,
-        uint256 minDy 
-    ) external nonReentrant   returns (uint256 dy) { //rateLimited sanityCheck  //! non so se lo voglio davvero qui
+        uint256 minDy
+    ) external nonReentrant returns (uint256 dy) {
+        //rateLimited sanityCheck  //! non so se lo voglio davvero qui
         require(!emergencyShutdown, "Emergency shutdown active");
         require(i != j, "i = j");
 
@@ -474,10 +475,9 @@ contract StableSwap is
                 );
                 new_xs[i] = old_xs[i] + amount * multipliers[i];
             } else {
-              new_xs[i] = old_xs[i];
+                new_xs[i] = old_xs[i];
             }
         }
-
 
         // Calculate new liquidity d1
         uint256 d1 = _getD(new_xs);
@@ -512,53 +512,57 @@ contract StableSwap is
         }
         require(shares >= minShares, "shares < min");
         _mint(msg.sender, shares);
-        
     }
 
     function removeLiquidity(
         uint256 shares,
         uint256[N] calldata minAmountsOut
-    )
-        external
-        nonReentrant
-        //rateLimited
-        //sanityCheck
-        returns (uint256[N] memory amountsOut)
-    {
+    ) external nonReentrant returns (uint256[N] memory amountsOut) {
         require(!emergencyShutdown, "Emergency shutdown active");
 
-        // Limit withdrawal size //! non so se lo voglio davvero qui e in che limite
-        //require(shares <= totalSupply() / 20, "Withdrawal too large");
-
-        // Use free funds for calculations
-        //uint256 freeFunds = _freeFunds(); // ❌ ADD THIS
         uint256 _totalSupply = totalSupply();
 
-        // Calcola la quota di MNT a cui l'utente ha diritto
         uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
         require(mntAmountOut >= minAmountsOut[0], "MNT out < min");
 
-        // Calcola la quota di stMNT a cui l'utente ha diritto
         uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
         require(stMntAmountOut >= minAmountsOut[1], "stMNT out < min");
 
-        amountsOut[0] = mntAmountOut;
-        amountsOut[1] = stMntAmountOut;
+        uint256 liquidMnt = balances[0] - totalLentToStrategy;
 
-        // Se l'MNT liquido non è sufficiente, lo richiamiamo dalla strategy
-        uint256 liquidMnt = IERC20(tokens[0]).balanceOf(address(this));
         if (liquidMnt < mntAmountOut) {
-            IStrategyStMnt(strategy).poolCallWithdraw(mntAmountOut - liquidMnt);
+            uint256 amountToRecall = mntAmountOut - liquidMnt;
+            uint256 actualRecalled = IStrategyStMnt(strategy).poolCallWithdraw(
+                amountToRecall
+            );
+
+            if (totalLentToStrategy < actualRecalled) {
+                totalLentToStrategy = 0;
+            } else {
+                totalLentToStrategy -= actualRecalled;
+            }
         }
 
-        // Aggiorna la contabilità interna
+        //!!DA RIVEDERE HO DELLE RISERVE
+        uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
+        uint256 actualMntOut = actualBalance < mntAmountOut
+            ? actualBalance
+            : mntAmountOut;
+
         balances[0] -= mntAmountOut;
         balances[1] -= stMntAmountOut;
 
-        // Brucia le quote e trasferisce i token
+        amountsOut[0] = actualMntOut;
+        amountsOut[1] = stMntAmountOut;
+
         _burn(msg.sender, shares);
-        IERC20(tokens[0]).safeTransfer(msg.sender, mntAmountOut);
+
+        // Trasferisci quello che hai
+        IERC20(tokens[0]).safeTransfer(msg.sender, actualMntOut);
         IERC20(tokens[1]).safeTransfer(msg.sender, stMntAmountOut);
+
+        console.log("Requested:", mntAmountOut);
+        console.log("Actually transferred:", actualMntOut);
     }
 
     /**
@@ -648,10 +652,7 @@ contract StableSwap is
         strategy = _strategy;
     }
 
-    function lendToStrategy()
-        external
-        onlyKeeper()
-    {
+    function lendToStrategy() external onlyKeeper {
         require(strategy != address(0), "Strategy not set");
 
         // Calcola il 30% del saldo di MNT come buffer
@@ -760,7 +761,6 @@ contract StableSwap is
         uint256 totalMNT = balances[0] + totalLentToStrategy;
         uint256 freeMNT = totalMNT; // Default: all MNT is free
 
-  
         uint256 totalAssets = _totalAssets();
         uint256 lockedProfit = _calculateLockedProfit();
 
