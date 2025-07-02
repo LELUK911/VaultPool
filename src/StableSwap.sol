@@ -385,13 +385,12 @@ contract StableSwap is
     // Estimate value of 1 share
     // How many tokens is one share worth?
     function getVirtualPrice() public view returns (uint256) {
-        //uint256 d = _getD(_xp());
-        uint256 d = _getD(_xpWithFreeFunds()); // Use free funds, not total
         uint256 _totalSupply = totalSupply();
-        if (_totalSupply > 0) {
-            return (d * 10 ** decimals()) / _totalSupply;
+        if (_totalSupply == 0) {
+            return 0; // ✅ Return early se non ci sono shares
         }
-        return 0;
+        uint256 d = _getD(_xpWithFreeFunds());
+        return (d * 10 ** decimals()) / _totalSupply;
     }
 
     /**
