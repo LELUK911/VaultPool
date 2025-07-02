@@ -625,15 +625,54 @@ contract StableSwap is
         uint256 minAmountOut
     ) external returns (uint256 amountOut) {
         (amountOut, ) = _calcWithdrawOneToken(shares, i);
+        console.log("Requested amount out:", amountOut);
         require(amountOut >= minAmountOut, "out < min");
 
-        // Se si preleva MNT (i=0) e non ce n'è abbastanza, lo richiamiamo
-        if (i == 0 && IERC20(tokens[0]).balanceOf(address(this)) < amountOut) {
-            IStrategyStMnt(strategy).poolCallWithdraw(
-                amountOut - IERC20(tokens[0]).balanceOf(address(this))
-            );
+        // ✅ SOLO PER WMNT (token 0) FACCIAMO IL RECALL CHECK
+        if (i == 0) {
+            uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
+            console.log("Contract WMNT balance:", actualBalance);
+            console.log("Requested amount out:", amountOut);
+
+            // ✅ AGGIUNGI TOLLERANZA PER ARROTONDAMENTI
+            uint256 tolerance = amountOut / 1000000; // 0.0001% tolerance
+            if (tolerance == 0) tolerance = 1; // Minimo 1 wei di tolleranza
+
+            console.log("Tolerance:", tolerance);
+            console.log("Balance + tolerance:", actualBalance + tolerance);
+
+            // Solo recall se davvero manca una quantità significativa
+            if (actualBalance + tolerance < amountOut) {
+                uint256 amountToRecall = amountOut - actualBalance;
+                console.log("Amount to recall:", amountToRecall);
+
+                uint256 actualRecalled = IStrategyStMnt(strategy)
+                    .poolCallWithdraw(amountToRecall);
+                console.log("Actually recalled:", actualRecalled);
+
+                if (totalLentToStrategy < actualRecalled) {
+                    totalLentToStrategy = 0;
+                } else {
+                    totalLentToStrategy -= actualRecalled;
+                }
+            } else {
+                console.log("No recall needed - within tolerance");
+            }
+
+            
+            uint256 finalBalance = IERC20(tokens[0]).balanceOf(address(this));
+            if (finalBalance < amountOut) {
+                console.log(
+                    "Adjusting amount out from",
+                    amountOut,
+                    "to",
+                    finalBalance
+                );
+                amountOut = finalBalance; 
+            }
         }
 
+     
         balances[i] -= amountOut;
         _burn(msg.sender, shares);
 
