@@ -108,4 +108,6 @@ interface IStableSwap is IERC20 {
         uint256 _loss,
         uint256 _newTotalDebt
     ) external;
+
+    function callEmergencyCall() external;
 }

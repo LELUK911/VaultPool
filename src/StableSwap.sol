@@ -405,7 +405,7 @@ contract StableSwap is
         uint256 j,
         uint256 dx,
         uint256 minDy
-    ) external nonReentrant returns (uint256 dy) {
+    ) external nonReentrant whenNotPaused returns (uint256 dy) {
         //rateLimited sanityCheck  //! non so se lo voglio davvero qui
         require(!emergencyShutdown, "Emergency shutdown active");
         require(i != j, "i = j");
@@ -445,7 +445,14 @@ contract StableSwap is
     function addLiquidity(
         uint256[N] calldata amounts,
         uint256 minShares
-    ) external nonReentrant rateLimited sanityCheck returns (uint256 shares) {
+    )
+        external
+        nonReentrant
+        rateLimited
+        sanityCheck
+        whenNotPaused
+        returns (uint256 shares)
+    {
         require(!emergencyShutdown, "Emergency shutdown active");
 
         // Check deposit size limits
@@ -516,7 +523,12 @@ contract StableSwap is
     function removeLiquidity(
         uint256 shares,
         uint256[N] calldata minAmountsOut
-    ) external nonReentrant returns (uint256[N] memory amountsOut) {
+    )
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256[N] memory amountsOut)
+    {
         require(!emergencyShutdown, "Emergency shutdown active");
 
         uint256 _totalSupply = totalSupply();
@@ -560,8 +572,7 @@ contract StableSwap is
         IERC20(tokens[0]).safeTransfer(msg.sender, actualMntOut);
         IERC20(tokens[1]).safeTransfer(msg.sender, stMntAmountOut);
 
-        console.log("Requested:", mntAmountOut);
-        console.log("Actually transferred:", actualMntOut);
+    
     }
 
     /**
@@ -623,56 +634,44 @@ contract StableSwap is
         uint256 shares,
         uint256 i,
         uint256 minAmountOut
-    ) external returns (uint256 amountOut) {
+    ) external nonReentrant whenNotPaused returns (uint256 amountOut) {
         (amountOut, ) = _calcWithdrawOneToken(shares, i);
-        console.log("Requested amount out:", amountOut);
+     
         require(amountOut >= minAmountOut, "out < min");
 
-        // ✅ SOLO PER WMNT (token 0) FACCIAMO IL RECALL CHECK
+
         if (i == 0) {
             uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
-            console.log("Contract WMNT balance:", actualBalance);
-            console.log("Requested amount out:", amountOut);
+    
 
-            // ✅ AGGIUNGI TOLLERANZA PER ARROTONDAMENTI
+
             uint256 tolerance = amountOut / 1000000; // 0.0001% tolerance
             if (tolerance == 0) tolerance = 1; // Minimo 1 wei di tolleranza
 
-            console.log("Tolerance:", tolerance);
-            console.log("Balance + tolerance:", actualBalance + tolerance);
+        
 
             // Solo recall se davvero manca una quantità significativa
             if (actualBalance + tolerance < amountOut) {
                 uint256 amountToRecall = amountOut - actualBalance;
-                console.log("Amount to recall:", amountToRecall);
+      
 
                 uint256 actualRecalled = IStrategyStMnt(strategy)
                     .poolCallWithdraw(amountToRecall);
-                console.log("Actually recalled:", actualRecalled);
+            
 
                 if (totalLentToStrategy < actualRecalled) {
                     totalLentToStrategy = 0;
                 } else {
                     totalLentToStrategy -= actualRecalled;
                 }
-            } else {
-                console.log("No recall needed - within tolerance");
             }
 
-            
             uint256 finalBalance = IERC20(tokens[0]).balanceOf(address(this));
             if (finalBalance < amountOut) {
-                console.log(
-                    "Adjusting amount out from",
-                    amountOut,
-                    "to",
-                    finalBalance
-                );
-                amountOut = finalBalance; 
+                amountOut = finalBalance;
             }
         }
 
-     
         balances[i] -= amountOut;
         _burn(msg.sender, shares);
 
@@ -687,10 +686,17 @@ contract StableSwap is
     uint256 public totalLentToStrategy; // Il "debito" che la Strategy ha verso la Pool
 
     function setStrategy(address _strategy) external onlyStrategyManager {
+        require(_strategy != address(0), "Invalid strategy");
+        // Solo se non c'è debito attivo o con approval governance
+        require(
+            totalLentToStrategy == 0 || hasRole(GOVERNANCE_ROLE, msg.sender),
+            "Cannot change strategy with active debt"
+        );
         strategy = _strategy;
     }
 
-    function lendToStrategy() external onlyKeeper {
+    function lendToStrategy() external onlyKeeper whenNotPaused nonReentrant {
+        require(!strategyPaused, "strategy in pause");
         require(strategy != address(0), "Strategy not set");
 
         // Calcola il 30% del saldo di MNT come buffer
@@ -712,7 +718,7 @@ contract StableSwap is
         }
     }
 
-    function recallMntfromStrategy(uint256 _amount) internal /*onlyOwner*/ {
+    function recallMntfromStrategy(uint256 _amount) internal {
         require(strategy != address(0), "Strategy not set");
         require(totalLentToStrategy >= _amount, "Not enough lent to strategy");
         uint256 _wmntOut = IStrategyStMnt(strategy).poolCallWithdraw(_amount);
@@ -721,12 +727,16 @@ contract StableSwap is
         totalLentToStrategy -= _wmntOut;
     }
 
+    modifier onlyStrategyContract() {
+        require(msg.sender == strategy, "Not a trusted strategy");
+        _;
+    }
+
     function report(
         uint256 _profit,
         uint256 _loss,
         uint256 _newTotalDebt
-    ) external {
-        require(msg.sender == strategy, "Not a trusted strategy");
+    ) external onlyStrategyContract {
         require(_profit == 0 || _loss == 0, "Cannot have both profit and loss");
 
         _updateLockedProfit(_profit, _loss);
@@ -810,5 +820,26 @@ contract StableSwap is
 
         xp[0] = freeMNT * multipliers[0];
         xp[1] = balances[1] * multipliers[1];
+    }
+
+    bool private strategyPaused = false;
+
+    function setStrategyInPause(bool _pause) external onlyGuardianOrGovernance {
+        strategyPaused = _pause;
+    }
+
+    function callEmergencyCall() external onlyStrategyContract {
+        _pause();
+        strategyPaused = true;
+        totalLentToStrategy = 0; //! torna tutto indietro quindi si azzera
+        balances[0] = IERC20(tokens[0]).balanceOf(address(this));
+        //! DOBBIAMO IPOTIZARE CHE UN POSSIBILE PROBLEMA ALLA VAULT O A COSA POSSA FAR TORNARE MENO TOKEN DI QUELLO CHE MI ASPETTO
+    }
+
+    function recoverERC20(address token, address to) external onlyGovernance {
+        require(token != tokens[0], "Cannot recover token 0");
+        require(token != tokens[1], "Cannot recover token 1");
+        require(token != address(this), "Cannot recover LP tokens");
+        IERC20(token).safeTransfer(to, IERC20(token).balanceOf(address(this)));
     }
 }

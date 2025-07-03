@@ -81,7 +81,10 @@ contract BaseTest is Test {
         strategy = new StrategyStMnt(
             address(WMNT),
             address(stVault),
-            address(pool)
+            address(pool),
+            owner,
+            owner,
+            owner
         );
 
         vm.startPrank(owner);
@@ -238,5 +241,33 @@ contract BaseTest is Test {
         vm.prank(VAULT_KEEPER);
         strategy2nd.harvest();
         skip(5 seconds); // Simulate time passing for the next harvest
+    }
+
+    function emergencyCallStrAndPool(address _user) internal {
+        vm.prank(_user);
+        strategy.emergencyWithdrawAll();
+    }
+
+    function setStrategyInPause(address _user, bool _pause) internal {
+        vm.prank(_user);
+        pool.setStrategyInPause(_pause);
+    }
+
+    function recoverERC20Strategy(
+        address _user,
+        address token,
+        address to
+    ) internal {
+        vm.prank(_user);
+        strategy.recoverERC20(token, to);
+    }
+
+    function recoverERC20Pool(
+        address _user,
+        address token,
+        address to
+    ) internal {
+        vm.prank(_user);
+        pool.recoverERC20(token, to);
     }
 }

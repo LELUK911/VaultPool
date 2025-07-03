@@ -81,7 +81,10 @@ contract StrategyTest is Test {
         strategy = new StrategyStMnt(
             address(WMNT),
             address(stVault),
-            address(pool)
+            address(pool),
+            owner,
+            owner,
+            owner
         );
 
         vm.startPrank(owner);

@@ -365,9 +365,11 @@ contract StrategyStMnt is AccessControl, Pausable, ReentrancyGuard {
             balanceMNTTGivenPool -= _loss;
         } else {
             _profit = (_wantBalance + _wantInStMNt) - balanceMNTTGivenPool;
-            _boostFee = claimBoostFee(_profit); //! qui inviamo le boost fee al vault
-            require(_boostFee <= _profit, "Boost fee exceeds profit");
-            _profit -= _boostFee; //? Sottraiamo il boost fee dal profitto
+            if (!emergencyAction) {
+                _boostFee = claimBoostFee(_profit); //! qui inviamo le boost fee al vault
+                require(_boostFee <= _profit, "Boost fee exceeds profit");
+                _profit -= _boostFee; //? Sottraiamo il boost fee dal profitto
+            }
             balanceMNTTGivenPool += _profit;
         }
 
@@ -396,30 +398,59 @@ contract StrategyStMnt is AccessControl, Pausable, ReentrancyGuard {
         return _wantBalance + _wantInStMNt + balanceMNTTGivenPool;
     }
 
+    bool emergencyAction = false;
+
     function emergencyWithdrawAll() external onlyGovernance {
-        // Withdraw everything from vault
         _pause();
+        emergencyAction = true;
+
+        console.log("=== EMERGENCY DEBUG ===");
+        console.log("balanceMNTTGivenPool before:", balanceMNTTGivenPool);
+
         uint256 shares = stVault.balanceOf(address(this));
+        console.log("Shares to withdraw:", shares);
+
         if (shares > 0) {
-            stVault.withdraw(shares, address(this), 0);
+            uint256 expectedOut = convertStmntToWmnt(shares);
+            console.log("Expected WMNT from vault:", expectedOut);
+
+            // ✅ WITHDRAW DIRETTAMENTE DAL VAULT
+            uint256 actualOut = stVault.withdraw(shares, address(this), 0);
+            console.log("Actual WMNT from vault:", actualOut);
+
+            // ✅ RESET CONTATORI MANUALMENTE
+            balanceSharesInVault = 0;
+            // NON chiamare _withdrawFromVault() per evitare double-subtract
         }
 
-        // Send all to pool
         uint256 balance = IERC20(want).balanceOf(address(this));
+        console.log("Final balance after vault withdrawal:", balance);
+        console.log("balanceMNTTGivenPool after:", balanceMNTTGivenPool);
 
         uint256 _profit = 0;
         uint256 _loss = 0;
 
-        if (balanceMNTTGivenPool >= balance) {
+        // ✅ CALCOLO SEMPLIFICATO
+        if (balanceMNTTGivenPool > balance) {
             _loss = balanceMNTTGivenPool - balance;
-        } else {
+            console.log("Emergency loss:", _loss);
+        } else if (balance > balanceMNTTGivenPool) {
             _profit = balance - balanceMNTTGivenPool;
+            console.log("Emergency profit:", _profit);
         }
 
         if (balance > 0) {
             IERC20(want).safeTransfer(address(pool), balance);
             balanceMNTTGivenPool = 0; // Reset debt
         }
+
         pool.report(_profit, _loss, balanceMNTTGivenPool);
+        pool.callEmergencyCall();
+    }
+
+    function recoverERC20(address token, address to) external onlyGovernance {
+        require(token != want, "Cannot recover want token");
+        require(token != address(stVault), "Cannot recover vault shares");
+        IERC20(token).safeTransfer(to, IERC20(token).balanceOf(address(this)));
     }
 }
