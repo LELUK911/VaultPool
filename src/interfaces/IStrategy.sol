@@ -2,95 +2,181 @@
 pragma solidity ^0.8.19;
 
 /**
- * @title Interfaccia per il contratto StrategyStMnt
- * @notice Definisce tutte le funzioni esterne e pubbliche della Strategy,
- * permettendo alla Pool e ad altri contratti di interagire con essa in modo type-safe.
+ * @title IStrategyStMnt
+ * @notice Interface for the StrategyStMnt contract
+ * @dev Defines all external and public functions of the Strategy,
+ *      enabling type-safe interaction between the Pool and other contracts
+ * @author Your Team
  */
 interface IStrategyStMnt {
     // =================================================================
-    // GETTER PER LE VARIABILI DI STATO PUBBLICHE
+    // STATE VARIABLE GETTERS
     // =================================================================
 
-    function poolCallWithdraw(uint256 _amount) external returns (uint256);
-
     /**
-     * @notice L'indirizzo del token che la strategia vuole massimizzare (MNT).
+     * @notice Returns the address of the token this strategy aims to maximize (MNT)
+     * @return Address of the want token
      */
     function want() external view returns (address);
 
     /**
-     * @notice L'indirizzo del Vault di staking (stMNT) in cui la strategia deposita i fondi.
+     * @notice Returns the address of the staking vault (stMNT) where strategy deposits funds
+     * @return Address of the staking vault
      */
     function stVault() external view returns (address);
 
     /**
-     * @notice L'indirizzo della Pool di liquidità a cui questa strategia è collegata.
+     * @notice Returns the address of the liquidity pool connected to this strategy
+     * @return Address of the stable swap pool
      */
     function pool() external view returns (address);
 
     /**
-     * @notice Traccia la quantità di 'want' token (MNT) che la Pool ha prestato a questa strategia.
-     * @dev Questo rappresenta il "debito" della strategia verso la pool.
+     * @notice Returns the amount of MNT tokens that the pool has lent to this strategy
+     * @dev This represents the strategy's debt to the pool
+     * @return Amount of MNT tokens owed to the pool
      */
     function balanceMNTTGivenPool() external view returns (uint256);
 
     // =================================================================
-    // FUNZIONI PUBBLICHE E DI GESTIONE
+    // BALANCE QUERY FUNCTIONS
     // =================================================================
 
     /**
-     * @notice Restituisce il saldo di 'want' token (MNT) attualmente detenuto da questo contratto.
+     * @notice Returns the balance of want tokens (MNT) currently held by this contract
+     * @return Balance of MNT tokens in the strategy contract
      */
     function balanceWmnt() external view returns (uint256);
 
     /**
-     * @notice Restituisce il saldo di quote del vault (stMNT) detenute da questo contratto.
+     * @notice Returns the balance of vault shares (stMNT) held by this contract
+     * @return Balance of stMNT vault shares owned by the strategy
      */
     function balanceStMnt() external view returns (uint256);
 
     /**
-     * @notice Approva o revoca l'allowance illimitato di 'want' token verso la Pool.
-     * @dev Utile in scenari di migrazione o rimborso del debito.
-     * @param _approve Se true, imposta l'allowance a MAX_UINT256, altrimenti a 0.
+     * @notice Returns the total estimated assets under management by this strategy
+     * @dev Includes liquid MNT + staked MNT value + pool debt
+     * @return Total estimated asset value in MNT terms
      */
-    function updateUnlimitedSpendingPool(bool _approve) external;
-
-    /**
-     * @notice Approva o revoca l'allowance illimitato di 'want' token verso il Vault.
-     * @param _approve Se true, imposta l'allowance a MAX_UINT256, altrimenti a 0.
-     */
-    function updateUnlimitedSpendingVault(bool _approve) external;
-
-    /**
-     * @notice Funzione principale chiamata da un keeper o dal governance per eseguire il ciclo di rendimento.
-     * @dev Idealmente, questa funzione dovrebbe ricevere i fondi dalla pool, depositarli,
-     * raccogliere le ricompense, e fare un report alla pool.
-     * @return _profit Il profitto generato in questo ciclo di harvest.
-     */
-    function harvest() external returns (uint256 _profit);
+    function estimatedTotalAssets() external view returns (uint256);
 
     // =================================================================
-    // FUNZIONI CHE LA POOL CHIAMERÀ SULLA STRATEGY (Pattern Push)
-    // Queste funzioni andranno aggiunte al tuo contratto StrategyStMnt
+    // POOL INTERACTION FUNCTIONS
     // =================================================================
 
     /**
-     * @notice Riceve MNT dalla Pool e li investe nel Vault.
-     * @dev Questa è la funzione che la Pool chiama per "spingere" i fondi alla strategy.
-     * @param _amount La quantità di 'want' token (MNT) da investire.
+     * @notice Receives MNT tokens from the pool and invests them in the vault
+     * @dev Called by the pool when lending funds to this strategy
+     * @param _amount Amount of MNT tokens to invest
      */
     function invest(uint256 _amount) external;
 
     /**
-     * @notice Preleva MNT dal Vault e li restituisce alla Pool.
-     * @dev Questa funzione viene chiamata dalla Pool quando ha bisogno di liquidità.
-     * @param _amount La quantità di 'want' token (MNT) da prelevare.
+     * @notice Withdraws MNT tokens from the vault and returns them to the pool
+     * @dev Called by the pool when liquidity is needed for user withdrawals
+     * @param _amount Amount of MNT tokens to withdraw
+     * @return Amount of MNT tokens actually withdrawn and sent to pool
+     */
+    function poolCallWithdraw(uint256 _amount) external returns (uint256);
+
+    /**
+     * @notice Withdraws specified amount of MNT tokens from the vault
+     * @dev Generic withdrawal function for strategy management
+     * @param _amount Amount of MNT tokens to withdraw
      */
     function withdraw(uint256 _amount) external;
 
+    // =================================================================
+    // STRATEGY OPERATIONS
+    // =================================================================
+
     /**
-     * @notice Restituisce il valore totale degli asset gestiti dalla strategia.
-     * @return Il valore totale in 'want' token (MNT).
+     * @notice Executes the yield harvesting cycle and reports results to pool
+     * @dev Deposits idle funds, collects rewards, calculates profit/loss, and reports to pool
+     * @return _profit Amount of profit generated in this harvest cycle
      */
-    function estimatedTotalAssets() external view returns (uint256);
+    function harvest() external returns (uint256 _profit);
+
+    // =================================================================
+    // GOVERNANCE FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Approves or revokes unlimited spending allowance for the pool
+     * @dev Useful for debt repayment or migration scenarios
+     * @param _approve If true, sets allowance to MAX_UINT256, otherwise sets to 0
+     */
+    function updateUnlimitedSpendingPool(bool _approve) external;
+
+    /**
+     * @notice Approves or revokes unlimited spending allowance for the vault
+     * @dev Required for depositing funds into the staking vault
+     * @param _approve If true, sets allowance to MAX_UINT256, otherwise sets to 0
+     */
+    function updateUnlimitedSpendingVault(bool _approve) external;
+
+    /**
+     * @notice Sets the performance fee taken from strategy profits
+     * @dev Only strategy manager can call this function
+     * @param _boostFee New boost fee in basis points (max 10000 = 100%)
+     */
+    function setBoostFee(uint24 _boostFee) external;
+
+    /**
+     * @notice Sets the address of an additional stMNT strategy for coordination
+     * @dev Used for future strategy composition and yield optimization
+     * @param _stMntStrategy Address of the stMNT strategy contract
+     */
+    function setStMntStrategy(address _stMntStrategy) external;
+
+    /**
+     * @notice Recovers accidentally sent ERC20 tokens from the strategy
+     * @dev Cannot recover want tokens or vault shares for security
+     * @param token Address of the token to recover
+     * @param to Address to send the recovered tokens to
+     */
+    function recoverERC20(address token, address to) external;
+
+    // =================================================================
+    // EMERGENCY FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Emergency function to withdraw all funds and return to pool
+     * @dev Pauses strategy, exits all positions, and triggers pool emergency mode
+     */
+    function emergencyWithdrawAll() external;
+
+    /**
+     * @notice Pauses all strategy operations
+     * @dev Can be called by guardian or governance in emergency situations
+     */
+    function pause() external;
+
+    /**
+     * @notice Resumes strategy operations after pause
+     * @dev Only governance can unpause for security reasons
+     */
+    function unpause() external;
+
+    // =================================================================
+    // ACCESS CONTROL FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Grants a role to an account
+     * @dev Only admin can grant roles to maintain security hierarchy
+     * @param role The role identifier to grant
+     * @param account The address to receive the role
+     */
+    function grantRole(bytes32 role, address account) external;
+
+    /**
+     * @notice Revokes a role from an account
+     * @dev Only admin can revoke roles to maintain security hierarchy
+     * @param role The role identifier to revoke
+     * @param account The address to lose the role
+     */
+    function revokeRole(bytes32 role, address account) external;
 }

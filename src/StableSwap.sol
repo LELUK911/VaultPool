@@ -12,12 +12,28 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {console} from "forge-std/console.sol";
 
+/**
+ * @title Math Library
+ * @notice Provides basic mathematical operations for the StableSwap contract
+ */
 library Math {
+    /**
+     * @notice Calculates the absolute difference between two numbers
+     * @param x First number
+     * @param y Second number
+     * @return The absolute difference between x and y
+     */
     function abs(uint256 x, uint256 y) internal pure returns (uint256) {
         return x >= y ? x - y : y - x;
     }
 }
 
+/**
+ * @title StableSwap
+ * @notice A stable swap AMM for trading between MNT and stMNT tokens with integrated yield strategy
+ * @dev Implements Curve-style stable swap math with security extensions and strategy integration
+ * @author Your Team
+ */
 contract StableSwap is
     ERC20,
     StableSwapSecurityExtensions,
@@ -27,6 +43,11 @@ contract StableSwap is
 {
     using SafeERC20 for IERC20;
 
+    // =================================================================
+    // ROLE DEFINITIONS
+    // =================================================================
+
+    /// @notice Default admin role - can grant/revoke all other roles
     bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
 
     /// @notice Governance role - can update parameters and strategy
@@ -45,33 +66,112 @@ contract StableSwap is
     /// @notice Strategy role - only the strategy contract can report
     bytes32 public constant STRATEGY_ROLE = keccak256("STRATEGY_ROLE");
 
-    // Number of tokens
+    // =================================================================
+    // CONSTANTS AND IMMUTABLES
+    // =================================================================
+
+    /// @notice Number of tokens in the pool (always 2: MNT and stMNT)
     uint256 internal constant N = 2;
-    // Amplification coefficient multiplied by N^(N - 1)
-    // Higher value makes the curve more flat
-    // Lower value makes the curve more like constant product AMM
+
+    /// @notice Amplification coefficient multiplied by N^(N-1)
+    /// @dev Higher value makes curve flatter, lower makes it more like constant product AMM
     uint256 private constant A = 1000 * (N ** (N - 1));
-    // 0.03%
+
+    /// @notice Base swap fee in basis points (0.03%)
     uint256 private constant SWAP_FEE = 300;
-    // Liquidity fee is derived from 2 constraints
-    // 1. Fee is 0 for adding / removing liquidity that results in a balanced pool
-    // 2. Swapping in a balanced pool is like adding and then removing liquidity
-    //    from a balanced pool
-    // swap fee = add liquidity fee + remove liquidity fee
+
+    /// @notice Liquidity fee derived from swap fee for balanced operations
+    /// @dev Formula: (SWAP_FEE * N) / (4 * (N - 1))
     uint256 private constant LIQUIDITY_FEE = (SWAP_FEE * N) / (4 * (N - 1));
+
+    /// @notice Fee denominator for basis point calculations
     uint256 private constant FEE_DENOMINATOR = 1e6;
 
+    // =================================================================
+    // STATE VARIABLES
+    // =================================================================
+
+    /// @notice Array of token addresses [MNT, stMNT]
     address[N] public tokens;
-    // Normalize each token to 18 decimals
-    // Example - DAI (18 decimals), USDC (6 decimals), USDT (6 decimals)
+
+    /// @notice Multipliers to normalize tokens to 18 decimals
+    /// @dev Both tokens use 18 decimals, so both multipliers are 1
     uint256[N] private multipliers = [1, 1];
+
+    /// @notice Internal accounting balances for each token
     uint256[N] public balances;
 
-    // 1 share = 1e18, 18 decimals
-
-    //! MODIFICHE PER STRATEGIA
+    /// @notice Balance of tokens currently lent to strategy (unused)
     uint256[N] public balanceInStrategy;
 
+    /// @notice Address of the yield strategy contract
+    address public strategy;
+
+    /// @notice Total amount of MNT currently lent to the strategy
+    uint256 public totalLentToStrategy;
+
+    /// @notice Flag to pause strategy operations independently
+    bool private strategyPaused = false;
+
+    // =================================================================
+    // EVENTS
+    // =================================================================
+
+    /**
+     * @notice Emitted when tokens are swapped
+     * @param buyer Address that performed the swap
+     * @param tokenIn Index of input token
+     * @param tokenOut Index of output token
+     * @param amountIn Amount of input tokens
+     * @param amountOut Amount of output tokens
+     * @param fee Fee paid for the swap
+     */
+    event TokenSwap(
+        address indexed buyer,
+        uint256 indexed tokenIn,
+        uint256 indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        uint256 fee
+    );
+
+    /**
+     * @notice Emitted when liquidity is added
+     * @param provider Address that added liquidity
+     * @param amounts Array of token amounts added
+     * @param fees Array of fees paid
+     * @param shares LP tokens minted
+     */
+    event AddLiquidity(
+        address indexed provider,
+        uint256[N] amounts,
+        uint256[N] fees,
+        uint256 shares
+    );
+
+    /**
+     * @notice Emitted when liquidity is removed
+     * @param provider Address that removed liquidity
+     * @param amounts Array of token amounts withdrawn
+     * @param shares LP tokens burned
+     */
+    event RemoveLiquidity(
+        address indexed provider,
+        uint256[N] amounts,
+        uint256 shares
+    );
+
+    // =================================================================
+    // CONSTRUCTOR
+    // =================================================================
+
+    /**
+     * @notice Initializes the StableSwap contract
+     * @param _tokens Array of token addresses [MNT, stMNT]
+     * @param _admin Address with admin privileges
+     * @param _governance Address with governance privileges
+     * @param _guardian Address with guardian privileges
+     */
     constructor(
         address[N] memory _tokens,
         address _admin,
@@ -101,7 +201,7 @@ contract StableSwap is
     }
 
     // =================================================================
-    // 🔒 ACCESS CONTROL MODIFIERS
+    // ACCESS CONTROL MODIFIERS
     // =================================================================
 
     /// @notice Only admin can call
@@ -168,6 +268,16 @@ contract StableSwap is
         _;
     }
 
+    /// @notice Only the strategy contract address can call
+    modifier onlyStrategyContract() {
+        require(msg.sender == strategy, "Not a trusted strategy");
+        _;
+    }
+
+    // =================================================================
+    // ROLE MANAGEMENT FUNCTIONS
+    // =================================================================
+
     /**
      * @notice Grant a role to an account
      * @param role The role to grant
@@ -208,55 +318,40 @@ contract StableSwap is
         _unpause();
     }
 
-    // Return precision-adjusted balances, adjusted to 18 decimals
-    /*
-    function _xp() private view returns (uint256[N] memory xp) {
-        for (uint256 i; i < N; ++i) {
-            xp[i] = balances[i] * multipliers[i];
-        }
-    }*/
-    function _xp() private view returns (uint256[N] memory xp) {
-        // Saldo di MNT = MNT nel contratto + MNT prestato alla strategy
-        xp[0] = (balances[0] + totalLentToStrategy) * multipliers[0];
+    // =================================================================
+    // CORE AMM MATHEMATICS
+    // =================================================================
 
-        // Saldo di stMNT (invariato)
+    /**
+     * @notice Returns precision-adjusted balances including strategy funds
+     * @dev Includes total MNT (physical + lent to strategy) for pricing calculations
+     * @return xp Array of precision-adjusted balances
+     */
+    function _xp() private view returns (uint256[N] memory xp) {
+        // MNT balance includes funds lent to strategy
+        xp[0] = (balances[0] + totalLentToStrategy) * multipliers[0];
+        // stMNT balance is only physical tokens in contract
         xp[1] = balances[1] * multipliers[1];
     }
 
     /**
-     * @notice Calculate D, sum of balances in a perfectly balanced pool
-     * If balances of x_0, x_1, ... x_(n-1) then sum(x_i) = D
+     * @notice Calculate D (total liquidity) using Newton's method
+     * @dev Implements Curve's stable swap invariant calculation
      * @param xp Precision-adjusted balances
-     * @return D
+     * @return D Total liquidity value
      */
     function _getD(uint256[N] memory xp) private pure returns (uint256) {
-        /*
-        Newton's method to compute D
-        -----------------------------
-        f(D) = ADn^n + D^(n + 1) / (n^n prod(x_i)) - An^n sum(x_i) - D 
-        f'(D) = An^n + (n + 1) D^n / (n^n prod(x_i)) - 1
-
-                     (as + np)D_n
-        D_(n+1) = -----------------------
-                  (a - 1)D_n + (n + 1)p
-
-        a = An^n
-        s = sum(x_i)
-        p = (D_n)^(n + 1) / (n^n prod(x_i))
-        */
         uint256 a = A * N; // An^n
 
-        uint256 s; // x_0 + x_1 + ... + x_(n-1)
+        uint256 s; // Sum of balances
         for (uint256 i; i < N; ++i) {
             s += xp[i];
         }
 
-        // Newton's method
-        // Initial guess, d <= s
+        // Newton's method convergence
         uint256 d = s;
         uint256 d_prev;
         for (uint256 i; i < 255; ++i) {
-            // p = D^(n + 1) / (n^n * x_0 * ... * x_(n-1))
             uint256 p = d;
             for (uint256 j; j < N; ++j) {
                 p = (p * d) / (N * xp[j]);
@@ -272,11 +367,13 @@ contract StableSwap is
     }
 
     /**
-     * @notice Calculate the new balance of token j given the new balance of token i
-     * @param i Index of token in
-     * @param j Index of token out
-     * @param x New balance of token i
+     * @notice Calculate new balance of token j given new balance of token i
+     * @dev Used for swap calculations using Newton's method
+     * @param i Index of input token
+     * @param j Index of output token
+     * @param x New balance of token i after deposit
      * @param xp Current precision-adjusted balances
+     * @return New balance of token j
      */
     function _getY(
         uint256 i,
@@ -284,23 +381,6 @@ contract StableSwap is
         uint256 x,
         uint256[N] memory xp
     ) private pure returns (uint256) {
-        /*
-        Newton's method to compute y
-        -----------------------------
-        y = x_j
-
-        f(y) = y^2 + y(b - D) - c
-
-                    y_n^2 + c
-        y_(n+1) = --------------
-                   2y_n + b - D
-
-        where
-        s = sum(x_k), k != j
-        p = prod(x_k), k != j
-        b = s + D / (An^n)
-        c = D^(n + 1) / (n^n * p * An^n)
-        */
         uint256 a = A * N;
         uint256 d = _getD(xp);
         uint256 s;
@@ -324,7 +404,6 @@ contract StableSwap is
 
         // Newton's method
         uint256 y_prev;
-        // Initial guess, y <= d
         uint256 y = d;
         for (uint256 _i; _i < 255; ++_i) {
             y_prev = y;
@@ -337,12 +416,11 @@ contract StableSwap is
     }
 
     /**
-     * @notice Calculate the new balance of token i given precision-adjusted
-     * balances xp and liquidity d
-     * @dev Equation is calculate y is same as _getY
-     * @param i Index of token to calculate the new balance
+     * @notice Calculate token balance given target liquidity D
+     * @dev Used for liquidity calculations
+     * @param i Index of token to calculate
      * @param xp Precision-adjusted balances
-     * @param d Liquidity d
+     * @param d Target liquidity value
      * @return New balance of token i
      */
     function _getYD(
@@ -370,7 +448,6 @@ contract StableSwap is
 
         // Newton's method
         uint256 y_prev;
-        // Initial guess, y <= d
         uint256 y = d;
         for (uint256 _i; _i < 255; ++_i) {
             y_prev = y;
@@ -382,23 +459,84 @@ contract StableSwap is
         revert("y didn't converge");
     }
 
-    // Estimate value of 1 share
-    // How many tokens is one share worth?
+    // =================================================================
+    // VIEW FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Calculate virtual price of LP tokens
+     * @dev Represents the value of 1 LP token in terms of underlying assets
+     * @return Virtual price scaled to 18 decimals
+     */
     function getVirtualPrice() public view returns (uint256) {
         uint256 _totalSupply = totalSupply();
         if (_totalSupply == 0) {
-            return 0; // ✅ Return early se non ci sono shares
+            return 0;
         }
         uint256 d = _getD(_xpWithFreeFunds());
         return (d * 10 ** decimals()) / _totalSupply;
     }
 
     /**
-     * @notice Swap dx amount of token i for token j
-     * @param i Index of token in
-     * @param j Index of token out
-     * @param dx Token in amount
-     * @param minDy Minimum token out
+     * @notice Returns precision-adjusted balances considering locked profit
+     * @dev Used for pricing to prevent MEV attacks during profit distribution
+     * @return xp Array of free funds balances
+     */
+    function _xpWithFreeFunds() internal view returns (uint256[N] memory xp) {
+        uint256 totalMNT = balances[0] + totalLentToStrategy;
+        uint256 freeMNT = totalMNT; // Default: all MNT is free
+
+        uint256 totalAssets = _totalAssets();
+        uint256 lockedProfit = _calculateLockedProfit();
+
+        // Calculate free MNT considering locked profit
+        if (totalAssets > 0 && lockedProfit > 0 && totalMNT > 0) {
+            uint256 lockedMNT = (lockedProfit * totalMNT) / totalAssets;
+            freeMNT = totalMNT > lockedMNT ? totalMNT - lockedMNT : totalMNT;
+        }
+
+        xp[0] = freeMNT * multipliers[0];
+        xp[1] = balances[1] * multipliers[1];
+    }
+
+    /**
+     * @notice Returns total assets under management
+     * @return Total assets including strategy funds
+     */
+    function _totalAssets() internal view returns (uint256) {
+        return IStrategyStMnt(strategy).estimatedTotalAssets() + balances[0];
+    }
+
+    /**
+     * @notice Returns free funds available for operations
+     * @dev Excludes locked profit to prevent MEV during harvests
+     * @return Available funds considering locked profit degradation
+     */
+    function _freeFunds() internal view returns (uint256) {
+        uint256 total = _totalAssets();
+        uint256 locked = _calculateLockedProfit();
+        return total > locked ? total - locked : 0;
+    }
+
+    /**
+     * @notice Public getter for free funds
+     * @return Free funds (total assets minus locked profit)
+     */
+    function getFreeFunds() external view returns (uint256) {
+        return _freeFunds();
+    }
+
+    // =================================================================
+    // SWAP FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Swap tokens in the pool
+     * @param i Index of input token (0 = MNT, 1 = stMNT)
+     * @param j Index of output token (0 = MNT, 1 = stMNT)
+     * @param dx Amount of input tokens
+     * @param minDy Minimum amount of output tokens (slippage protection)
+     * @return dy Amount of output tokens received
      */
     function swap(
         uint256 i,
@@ -406,13 +544,12 @@ contract StableSwap is
         uint256 dx,
         uint256 minDy
     ) external nonReentrant whenNotPaused returns (uint256 dy) {
-        //rateLimited sanityCheck  //! non so se lo voglio davvero qui
         require(!emergencyShutdown, "Emergency shutdown active");
-        require(i != j, "i = j");
+        require(i != j, "Cannot swap same token");
 
         IERC20(tokens[i]).transferFrom(msg.sender, address(this), dx);
 
-        // Calculate dy (logica invariata)
+        // Calculate output amount using stable swap math
         uint256[N] memory xp = _xp();
         uint256 x = xp[i] + dx * multipliers[i];
 
@@ -422,26 +559,33 @@ contract StableSwap is
 
         uint256 fee = (dy * SWAP_FEE) / FEE_DENOMINATOR;
         dy -= fee;
-        require(dy >= minDy, "dy < min");
+        require(dy >= minDy, "Insufficient output amount");
 
-        // ======================= INIZIO MODIFICA LOGICA =======================
-        // Se stiamo prelevando MNT (j=0) e non ne abbiamo abbastanza liquidi...
+        // Handle MNT withdrawals from strategy if needed
         if (j == 0 && IERC20(tokens[0]).balanceOf(address(this)) < dy) {
             uint256 amountNeeded = dy -
                 IERC20(tokens[0]).balanceOf(address(this));
-            // ...lo richiamiamo dalla Strategy.
             IStrategyStMnt(strategy).poolCallWithdraw(amountNeeded);
         }
-        // ======================== FINE MODIFICA LOGICA ========================
 
-        // Aggiorna la contabilità interna della pool (logica invariata)
+        // Update internal accounting
         balances[i] += dx;
         balances[j] -= dy;
 
-        // Trasferisci i fondi all'utente (logica invariata)
+        // Transfer output tokens to user
         IERC20(tokens[j]).transfer(msg.sender, dy);
     }
 
+    // =================================================================
+    // LIQUIDITY FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Add liquidity to the pool
+     * @param amounts Array of token amounts to add [MNT, stMNT]
+     * @param minShares Minimum LP tokens to receive (slippage protection)
+     * @return shares Amount of LP tokens minted
+     */
     function addLiquidity(
         uint256[N] calldata amounts,
         uint256 minShares
@@ -455,21 +599,16 @@ contract StableSwap is
     {
         require(!emergencyShutdown, "Emergency shutdown active");
 
-        // Check deposit size limits
-        //! se il deposito è ancora zero fallisce sempre, la devo rivedere dopo
-        //uint256 totalDeposit = amounts[0] + amounts[1];
-        //require(totalDeposit <= _freeFunds() / 10, "Deposit too large");
-
-        // calculate current liquidity d0
+        // Calculate current liquidity
         uint256 _totalSupply = totalSupply();
         uint256 d0;
         uint256[N] memory old_xs = _xpWithFreeFunds();
-        //uint256[N] memory old_xs = _xp();
 
         if (_totalSupply > 0) {
             d0 = _getD(old_xs);
         }
-        // Transfer tokens in
+
+        // Transfer tokens and calculate new balances
         uint256[N] memory new_xs;
         for (uint256 i; i < N; ++i) {
             uint256 amount = amounts[i];
@@ -485,20 +624,18 @@ contract StableSwap is
             }
         }
 
-        // Calculate new liquidity d1
+        // Calculate new liquidity
         uint256 d1 = _getD(new_xs);
-        require(d1 > d0, "liquidity didn't increase");
+        require(d1 > d0, "Liquidity must increase");
 
-        // Recalculate D accounting for fee on imbalance
+        // Calculate liquidity accounting for imbalance fees
         uint256 d2;
         if (_totalSupply > 0) {
             for (uint256 i; i < N; ++i) {
-                // TODO: why old_xs[i] * d1 / d0? why not d1 / N?
                 uint256 idealBalance = (old_xs[i] * d1) / d0;
                 uint256 diff = Math.abs(new_xs[i], idealBalance);
                 new_xs[i] -= (LIQUIDITY_FEE * diff) / FEE_DENOMINATOR;
             }
-
             d2 = _getD(new_xs);
         } else {
             d2 = d1;
@@ -509,17 +646,22 @@ contract StableSwap is
             balances[i] += amounts[i];
         }
 
-        // Shares to mint = (d2 - d0) / d0 * total supply
-        // d1 >= d2 >= d0
+        // Calculate shares to mint
         if (_totalSupply > 0) {
             shares = ((d2 - d0) * _totalSupply) / d0;
         } else {
             shares = d2;
         }
-        require(shares >= minShares, "shares < min");
+        require(shares >= minShares, "Insufficient shares");
         _mint(msg.sender, shares);
     }
 
+    /**
+     * @notice Remove liquidity proportionally
+     * @param shares Amount of LP tokens to burn
+     * @param minAmountsOut Minimum amounts to receive [MNT, stMNT]
+     * @return amountsOut Actual amounts withdrawn
+     */
     function removeLiquidity(
         uint256 shares,
         uint256[N] calldata minAmountsOut
@@ -534,13 +676,17 @@ contract StableSwap is
         uint256 _totalSupply = totalSupply();
 
         uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
-        require(mntAmountOut >= minAmountsOut[0], "MNT out < min");
+        require(mntAmountOut >= minAmountsOut[0], "Insufficient MNT output");
 
         uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
-        require(stMntAmountOut >= minAmountsOut[1], "stMNT out < min");
+        require(
+            stMntAmountOut >= minAmountsOut[1],
+            "Insufficient stMNT output"
+        );
 
         uint256 liquidMnt = balances[0] - totalLentToStrategy;
 
+        // Recall funds from strategy if needed
         if (liquidMnt < mntAmountOut) {
             uint256 amountToRecall = mntAmountOut - liquidMnt;
             uint256 actualRecalled = IStrategyStMnt(strategy).poolCallWithdraw(
@@ -554,7 +700,7 @@ contract StableSwap is
             }
         }
 
-        //!!DA RIVEDERE HO DELLE RISERVE
+        // Handle potential shortfall gracefully
         uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
         uint256 actualMntOut = actualBalance < mntAmountOut
             ? actualBalance
@@ -568,19 +714,16 @@ contract StableSwap is
 
         _burn(msg.sender, shares);
 
-        // Trasferisci quello che hai
         IERC20(tokens[0]).safeTransfer(msg.sender, actualMntOut);
         IERC20(tokens[1]).safeTransfer(msg.sender, stMntAmountOut);
-
-    
     }
 
     /**
-     * @notice Calculate amount of token i to receive for shares
-     * @param shares Shares to burn
+     * @notice Calculate withdrawal amount for single token
+     * @param shares Amount of LP tokens to burn
      * @param i Index of token to withdraw
      * @return dy Amount of token i to receive
-     *         fee Fee for withdraw. Fee already included in dy
+     * @return fee Fee for imbalanced withdrawal
      */
     function _calcWithdrawOneToken(
         uint256 shares,
@@ -589,34 +732,38 @@ contract StableSwap is
         uint256 _totalSupply = totalSupply();
         uint256[N] memory xp = _xp();
 
-        // Calculate d0 and d1
+        // Calculate target liquidity after withdrawal
         uint256 d0 = _getD(xp);
         uint256 d1 = d0 - (d0 * shares) / _totalSupply;
 
-        // Calculate reduction in y if D = d1
+        // Calculate withdrawal amount before fees
         uint256 y0 = _getYD(i, xp, d1);
-        // d1 <= d0 so y must be <= xp[i]
         uint256 dy0 = (xp[i] - y0) / multipliers[i];
 
-        // Calculate imbalance fee, update xp with fees
+        // Apply imbalance fees
         uint256 dx;
         for (uint256 j; j < N; ++j) {
             if (j == i) {
                 dx = (xp[j] * d1) / d0 - y0;
             } else {
-                // d1 / d0 <= 1
                 dx = xp[j] - (xp[j] * d1) / d0;
             }
             xp[j] -= (LIQUIDITY_FEE * dx) / FEE_DENOMINATOR;
         }
 
-        // Recalculate y with xp including imbalance fees
+        // Recalculate with fees
         uint256 y1 = _getYD(i, xp, d1);
-        // - 1 to round down
         dy = (xp[i] - y1 - 1) / multipliers[i];
         fee = dy0 - dy;
     }
 
+    /**
+     * @notice Calculate single token withdrawal (view function)
+     * @param shares Amount of LP tokens to burn
+     * @param i Index of token to withdraw
+     * @return dy Amount of token i to receive
+     * @return fee Fee for imbalanced withdrawal
+     */
     function calcWithdrawOneToken(
         uint256 shares,
         uint256 i
@@ -625,10 +772,11 @@ contract StableSwap is
     }
 
     /**
-     * @notice Withdraw liquidity in token i
-     * @param shares Shares to burn
-     * @param i Token to withdraw
-     * @param minAmountOut Minimum amount of token i that must be withdrawn
+     * @notice Remove liquidity in single token
+     * @param shares Amount of LP tokens to burn
+     * @param i Index of token to withdraw (0 = MNT, 1 = stMNT)
+     * @param minAmountOut Minimum amount to receive
+     * @return amountOut Actual amount withdrawn
      */
     function removeLiquidityOneToken(
         uint256 shares,
@@ -636,28 +784,19 @@ contract StableSwap is
         uint256 minAmountOut
     ) external nonReentrant whenNotPaused returns (uint256 amountOut) {
         (amountOut, ) = _calcWithdrawOneToken(shares, i);
-     
-        require(amountOut >= minAmountOut, "out < min");
+        require(amountOut >= minAmountOut, "Insufficient output");
 
-
+        // Handle MNT withdrawals with strategy recall
         if (i == 0) {
             uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
-    
-
-
             uint256 tolerance = amountOut / 1000000; // 0.0001% tolerance
-            if (tolerance == 0) tolerance = 1; // Minimo 1 wei di tolleranza
+            if (tolerance == 0) tolerance = 1; // Minimum 1 wei tolerance
 
-        
-
-            // Solo recall se davvero manca una quantità significativa
+            // Only recall if significantly short
             if (actualBalance + tolerance < amountOut) {
                 uint256 amountToRecall = amountOut - actualBalance;
-      
-
                 uint256 actualRecalled = IStrategyStMnt(strategy)
                     .poolCallWithdraw(amountToRecall);
-            
 
                 if (totalLentToStrategy < actualRecalled) {
                     totalLentToStrategy = 0;
@@ -678,16 +817,16 @@ contract StableSwap is
         IERC20(tokens[i]).safeTransfer(msg.sender, amountOut);
     }
 
-    //!   // =================================================================
+    // =================================================================
+    // STRATEGY INTEGRATION
+    // =================================================================
 
-    //! FUNZIONI CUSTOMIZATE PER LA STRATEGIA
-
-    address public strategy;
-    uint256 public totalLentToStrategy; // Il "debito" che la Strategy ha verso la Pool
-
+    /**
+     * @notice Set the yield strategy contract
+     * @param _strategy Address of the new strategy
+     */
     function setStrategy(address _strategy) external onlyStrategyManager {
         require(_strategy != address(0), "Invalid strategy");
-        // Solo se non c'è debito attivo o con approval governance
         require(
             totalLentToStrategy == 0 || hasRole(GOVERNANCE_ROLE, msg.sender),
             "Cannot change strategy with active debt"
@@ -695,43 +834,33 @@ contract StableSwap is
         strategy = _strategy;
     }
 
+    /**
+     * @notice Lend idle MNT to the yield strategy
+     * @dev Maintains 30% buffer for liquidity needs
+     */
     function lendToStrategy() external onlyKeeper whenNotPaused nonReentrant {
-        require(!strategyPaused, "strategy in pause");
+        require(!strategyPaused, "Strategy paused");
         require(strategy != address(0), "Strategy not set");
 
-        // Calcola il 30% del saldo di MNT come buffer
         uint256 bufferAmount = (balances[0] * 30) / 100;
         uint256 mntInContract = IERC20(tokens[0]).balanceOf(address(this));
 
         if (mntInContract > bufferAmount) {
             uint256 amountToLend = mntInContract - bufferAmount;
 
-            // Aggiorna la contabilità del debito
             totalLentToStrategy += amountToLend;
 
-            // Invia i fondi alla strategy
             IERC20(tokens[0]).safeTransfer(strategy, amountToLend);
-
-            // Chiama la funzione di investimento sulla strategy
-            //!PER ORA TENIAMO UN APPROCCIO MANUALE, DEVO CHIAMARE L'HARVEST IO, COSI IMPLEMENTO IL MECCANISCO DI DEGRADAZIONE PER EVITARE EXPLOIT
             IStrategyStMnt(strategy).invest(amountToLend);
         }
     }
 
-    function recallMntfromStrategy(uint256 _amount) internal {
-        require(strategy != address(0), "Strategy not set");
-        require(totalLentToStrategy >= _amount, "Not enough lent to strategy");
-        uint256 _wmntOut = IStrategyStMnt(strategy).poolCallWithdraw(_amount);
-        require(_wmntOut >= _amount, "Withdrawn amount is less than requested");
-
-        totalLentToStrategy -= _wmntOut;
-    }
-
-    modifier onlyStrategyContract() {
-        require(msg.sender == strategy, "Not a trusted strategy");
-        _;
-    }
-
+    /**
+     * @notice Receive profit/loss report from strategy
+     * @param _profit Amount of profit generated by strategy
+     * @param _loss Amount of loss incurred by strategy
+     * @param _newTotalDebt New total debt amount owed by strategy
+     */
     function report(
         uint256 _profit,
         uint256 _loss,
@@ -741,37 +870,42 @@ contract StableSwap is
 
         _updateLockedProfit(_profit, _loss);
 
-        // Aggiorna il debito totale
+        // Update strategy debt tracking
         totalLentToStrategy = _newTotalDebt;
 
-        // Se c'è stato un profitto, lo aggiungiamo alla contabilità.
-        // Questo aumenta il valore delle quote di tutti gli LP.
+        // Distribute profit to all LP holders
         if (_profit > 0) {
             balances[0] += _profit;
         }
 
-        // Se c'è stata una perdita, la sottraiamo.
+        // Account for losses
         if (_loss > 0) {
             balances[0] -= _loss;
         }
     }
 
     /**
-     * @notice Returns total assets including strategy debt
-     * @dev This should be implemented in the main contract
-     * @return Total assets under management
+     * @notice Pause/unpause strategy operations
+     * @param _pause True to pause, false to unpause
      */
-    function _totalAssets() internal view returns (uint256) {
-        return IStrategyStMnt(strategy).estimatedTotalAssets() + balances[0];
+    function setStrategyInPause(bool _pause) external onlyGuardianOrGovernance {
+        strategyPaused = _pause;
     }
 
     /**
-     * @notice Performs a health check and returns results
-     * @return isHealthy Whether all sanity checks pass
+     * @notice Emergency callback from strategy when issues occur
+     * @dev Pauses pool, strategy operations, and resets debt accounting
      */
-    function performHealthCheck() external view returns (bool isHealthy) {
-        return false; //_performSanityCheck();
+    function callEmergencyCall() external onlyStrategyContract {
+        _pause();
+        strategyPaused = true;
+        totalLentToStrategy = 0; // Strategy returns all funds
+        balances[0] = IERC20(tokens[0]).balanceOf(address(this));
     }
+
+    // =================================================================
+    // SECURITY AND EMERGENCY FUNCTIONS
+    // =================================================================
 
     /// @notice Validates balance changes don't exceed loss threshold
     modifier sanityCheck() {
@@ -786,60 +920,37 @@ contract StableSwap is
         }
     }
 
-    /**
-     * @notice Returns free funds available for operations (total - locked profit)
-     * @dev This is used instead of raw totalAssets for pricing calculations
-     * @return Available funds considering locked profit degradation
-     */
-    function _freeFunds() internal view returns (uint256) {
-        uint256 total = _totalAssets();
-        uint256 locked = _calculateLockedProfit();
-        return total > locked ? total - locked : 0;
-    }
+
+    // =================================================================
+    // GOVERNANCE FUNCTIONS
+    // =================================================================
 
     /**
-     * @notice Returns the current free funds available
-     * @return Free funds (total assets minus locked profit)
+     * @notice Recover accidentally sent ERC20 tokens
+     * @param token Address of token to recover
+     * @param to Address to send recovered tokens to
      */
-    function getFreeFunds() external view returns (uint256) {
-        return _freeFunds();
-    }
-
-    function _xpWithFreeFunds() internal view returns (uint256[N] memory xp) {
-        uint256 totalMNT = balances[0] + totalLentToStrategy;
-        uint256 freeMNT = totalMNT; // Default: all MNT is free
-
-        uint256 totalAssets = _totalAssets();
-        uint256 lockedProfit = _calculateLockedProfit();
-
-        // 🛡️ SAFETY: Check for division by zero
-        if (totalAssets > 0 && lockedProfit > 0 && totalMNT > 0) {
-            uint256 lockedMNT = (lockedProfit * totalMNT) / totalAssets;
-            freeMNT = totalMNT > lockedMNT ? totalMNT - lockedMNT : totalMNT;
-        }
-
-        xp[0] = freeMNT * multipliers[0];
-        xp[1] = balances[1] * multipliers[1];
-    }
-
-    bool private strategyPaused = false;
-
-    function setStrategyInPause(bool _pause) external onlyGuardianOrGovernance {
-        strategyPaused = _pause;
-    }
-
-    function callEmergencyCall() external onlyStrategyContract {
-        _pause();
-        strategyPaused = true;
-        totalLentToStrategy = 0; //! torna tutto indietro quindi si azzera
-        balances[0] = IERC20(tokens[0]).balanceOf(address(this));
-        //! DOBBIAMO IPOTIZARE CHE UN POSSIBILE PROBLEMA ALLA VAULT O A COSA POSSA FAR TORNARE MENO TOKEN DI QUELLO CHE MI ASPETTO
-    }
-
     function recoverERC20(address token, address to) external onlyGovernance {
         require(token != tokens[0], "Cannot recover token 0");
         require(token != tokens[1], "Cannot recover token 1");
         require(token != address(this), "Cannot recover LP tokens");
         IERC20(token).safeTransfer(to, IERC20(token).balanceOf(address(this)));
+    }
+
+    // =================================================================
+    // INTERNAL HELPER FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Internal function to recall funds from strategy
+     * @param _amount Amount of MNT to recall
+     */
+    function recallMntfromStrategy(uint256 _amount) internal {
+        require(strategy != address(0), "Strategy not set");
+        require(totalLentToStrategy >= _amount, "Not enough lent to strategy");
+        uint256 _wmntOut = IStrategyStMnt(strategy).poolCallWithdraw(_amount);
+        require(_wmntOut >= _amount, "Withdrawn amount is less than requested");
+
+        totalLentToStrategy -= _wmntOut;
     }
 }

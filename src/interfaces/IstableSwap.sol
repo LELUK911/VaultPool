@@ -3,50 +3,58 @@ pragma solidity ^0.8.19;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @title Interfaccia per il contratto StableSwap
-/// @notice Definisce tutte le funzioni esterne e pubbliche del contratto StableSwap,
-///         consentendo ad altri contratti di interagire con esso in modo type-safe.
-/// @dev Poiché il contratto StableSwap è anche un token ERC20, questa interfaccia
-///      eredita da IERC20 per includere tutte le funzioni standard del token.
+/**
+ * @title IStableSwap
+ * @notice Interface for the StableSwap contract
+ * @dev Defines all external and public functions of the StableSwap contract,
+ *      enabling type-safe interaction with other contracts. Since StableSwap is also
+ *      an ERC20 token (LP token), this interface inherits from IERC20.
+ * @author Your Team
+ */
 interface IStableSwap is IERC20 {
     // =================================================================
-    // GETTER PER LE VARIABILI DI STATO PUBBLICHE
+    // STATE VARIABLE GETTERS
     // =================================================================
 
     /**
-     * @notice Restituisce l'indirizzo del token a un dato indice (0 o 1).
-     * @param index L'indice del token nell'array.
-     * @return L'indirizzo del token ERC20.
+     * @notice Returns the address of a token at a given index
+     * @param index The index of the token in the array (0 or 1)
+     * @return The address of the ERC20 token
      */
     function tokens(uint256 index) external view returns (address);
 
     /**
-     * @notice Restituisce il saldo di un token all'interno della pool.
-     * @param index L'indice del token nell'array.
-     * @return Il saldo del token.
+     * @notice Returns the balance of a token within the pool
+     * @param index The index of the token in the array (0 = MNT, 1 = stMNT)
+     * @return The balance of the token held by the pool
      */
     function balances(uint256 index) external view returns (uint256);
 
+    /**
+     * @notice Returns the balance of tokens currently deployed in strategy
+     * @param index The index of the token in the array
+     * @return The balance of tokens lent to strategy
+     */
     function balanceInStrategy(uint256 index) external view returns (uint256);
 
     // =================================================================
-    // FUNZIONI PRINCIPALI DELLA POOL
+    // CORE POOL FUNCTIONS
     // =================================================================
 
     /**
-     * @notice Calcola il "prezzo virtuale" di una singola quota (share) della pool,
-     * espresso nel valore combinato dei token sottostanti.
-     * @return Il prezzo virtuale per quota.
+     * @notice Calculates the virtual price of a single LP token
+     * @dev Represents the value of one LP token in terms of underlying assets
+     * @return The virtual price per LP token (scaled to 18 decimals)
      */
     function getVirtualPrice() external view returns (uint256);
 
     /**
-     * @notice Scambia una quantità `dx` di token `i` per ottenere token `j`.
-     * @param i L'indice del token che si sta inviando (0 o 1).
-     * @param j L'indice del token che si vuole ricevere (0 o 1).
-     * @param dx La quantità di token `i` da scambiare.
-     * @param minDy La quantità minima di token `j` che si è disposti a ricevere.
-     * @return dy La quantità di token `j` ricevuta.
+     * @notice Swaps a specified amount of token i for token j
+     * @param i Index of the input token (0 = MNT, 1 = stMNT)
+     * @param j Index of the output token (0 = MNT, 1 = stMNT)
+     * @param dx Amount of token i to swap
+     * @param minDy Minimum amount of token j to receive (slippage protection)
+     * @return dy Actual amount of token j received
      */
     function swap(
         uint256 i,
@@ -56,10 +64,10 @@ interface IStableSwap is IERC20 {
     ) external returns (uint256 dy);
 
     /**
-     * @notice Aggiunge liquidità alla pool.
-     * @param amounts Un array con le quantità dei due token da depositare.
-     * @param minShares La quantità minima di quote (token LP) che si è disposti a ricevere.
-     * @return shares La quantità di quote (token LP) mintate.
+     * @notice Adds liquidity to the pool by depositing both tokens
+     * @param amounts Array containing amounts of both tokens to deposit [MNT, stMNT]
+     * @param minShares Minimum amount of LP tokens to receive (slippage protection)
+     * @return shares Amount of LP tokens minted to the depositor
      */
     function addLiquidity(
         uint256[2] calldata amounts,
@@ -67,10 +75,10 @@ interface IStableSwap is IERC20 {
     ) external returns (uint256 shares);
 
     /**
-     * @notice Rimuove liquidità dalla pool in cambio di entrambi i token sottostanti.
-     * @param shares La quantità di quote (token LP) da bruciare.
-     * @param minAmountsOut Un array con le quantità minime dei due token che si è disposti a ricevere.
-     * @return amountsOut Un array con le quantità dei due token effettivamente ricevute.
+     * @notice Removes liquidity proportionally in both underlying tokens
+     * @param shares Amount of LP tokens to burn
+     * @param minAmountsOut Minimum amounts of both tokens to receive [MNT, stMNT]
+     * @return amountsOut Actual amounts of both tokens withdrawn [MNT, stMNT]
      */
     function removeLiquidity(
         uint256 shares,
@@ -78,12 +86,12 @@ interface IStableSwap is IERC20 {
     ) external returns (uint256[2] memory amountsOut);
 
     /**
-     * @notice Calcola quanto del token `i` si riceverebbe bruciando una certa quantità di quote,
-     * inclusa la commissione di sbilanciamento.
-     * @param shares La quantità di quote da bruciare.
-     * @param i L'indice del token che si vuole prelevare.
-     * @return dy La quantità di token `i` che si riceverebbe.
-     * @return fee La commissione pagata per il prelievo sbilanciato.
+     * @notice Calculates the amount of a single token receivable for burning LP tokens
+     * @dev Includes imbalance fees for single-sided withdrawals
+     * @param shares Amount of LP tokens to burn
+     * @param i Index of the token to withdraw (0 = MNT, 1 = stMNT)
+     * @return dy Amount of token i that would be received
+     * @return fee Imbalance fee charged for the withdrawal
      */
     function calcWithdrawOneToken(
         uint256 shares,
@@ -91,11 +99,11 @@ interface IStableSwap is IERC20 {
     ) external view returns (uint256 dy, uint256 fee);
 
     /**
-     * @notice Rimuove liquidità dalla pool e la preleva sotto forma di un solo token.
-     * @param shares La quantità di quote (token LP) da bruciare.
-     * @param i L'indice del token che si vuole prelevare (0 o 1).
-     * @param minAmountOut La quantità minima del token `i` che si è disposti a ricevere.
-     * @return amountOut La quantità di token `i` effettivamente ricevuta.
+     * @notice Removes liquidity by withdrawing only one type of token
+     * @param shares Amount of LP tokens to burn
+     * @param i Index of the token to withdraw (0 = MNT, 1 = stMNT)
+     * @param minAmountOut Minimum amount of token i to receive (slippage protection)
+     * @return amountOut Actual amount of token i withdrawn
      */
     function removeLiquidityOneToken(
         uint256 shares,
@@ -103,11 +111,128 @@ interface IStableSwap is IERC20 {
         uint256 minAmountOut
     ) external returns (uint256 amountOut);
 
+    // =================================================================
+    // STRATEGY INTEGRATION FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Receives profit/loss report from the connected strategy
+     * @dev Called by strategy to update pool's accounting after yield operations
+     * @param _profit Amount of profit generated by the strategy
+     * @param _loss Amount of loss incurred by the strategy
+     * @param _newTotalDebt Updated total debt amount owed by strategy
+     */
     function report(
         uint256 _profit,
         uint256 _loss,
         uint256 _newTotalDebt
     ) external;
 
+    /**
+     * @notice Emergency callback function called by strategy during critical issues
+     * @dev Triggers emergency shutdown procedures to protect user funds
+     */
     function callEmergencyCall() external;
+
+    /**
+     * @notice Sets the active yield strategy for the pool
+     * @dev Only strategy manager can change the strategy address
+     * @param _strategy Address of the new strategy contract
+     */
+    function setStrategy(address _strategy) external;
+
+    /**
+     * @notice Lends idle MNT tokens to the strategy for yield generation
+     * @dev Maintains liquidity buffer and updates debt accounting
+     */
+    function lendToStrategy() external;
+
+    /**
+     * @notice Pauses or unpauses strategy operations independently from pool
+     * @dev Allows granular control over strategy without affecting pool operations
+     * @param _pause True to pause strategy operations, false to resume
+     */
+    function setStrategyInPause(bool _pause) external;
+
+    // =================================================================
+    // POOL MANAGEMENT FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Returns the current amount of free funds available for operations
+     * @dev Excludes locked profit to prevent MEV during harvest operations
+     * @return Available funds considering locked profit degradation
+     */
+    function getFreeFunds() external view returns (uint256);
+
+    /**
+     * @notice Performs a comprehensive health check on the protocol
+     * @dev Validates various invariants and system state consistency
+     * @return isHealthy True if all health checks pass
+     */
+    function performHealthCheck() external view returns (bool isHealthy);
+
+    /**
+     * @notice Recovers accidentally sent ERC20 tokens from the pool
+     * @dev Cannot recover pool tokens or LP tokens for security
+     * @param token Address of the token to recover
+     * @param to Address to send the recovered tokens to
+     */
+    function recoverERC20(address token, address to) external;
+
+    // =================================================================
+    // EMERGENCY FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Pauses all pool operations
+     * @dev Can be called by guardian or governance in emergency situations
+     */
+    function pause() external;
+
+    /**
+     * @notice Resumes pool operations after pause
+     * @dev Only governance can unpause for security reasons
+     */
+    function unpause() external;
+
+    // =================================================================
+    // ACCESS CONTROL FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Grants a role to an account
+     * @dev Only admin can grant roles to maintain security hierarchy
+     * @param role The role identifier to grant
+     * @param account The address to receive the role
+     */
+    function grantRole(bytes32 role, address account) external;
+
+    /**
+     * @notice Revokes a role from an account
+     * @dev Only admin can revoke roles to maintain security hierarchy
+     * @param role The role identifier to revoke
+     * @param account The address to lose the role
+     */
+    function revokeRole(bytes32 role, address account) external;
+
+    // =================================================================
+    // SECURITY EXTENSION FUNCTIONS
+    // =================================================================
+
+    /**
+     * @notice Returns the current amount of locked profit after degradation
+     * @dev Part of MEV protection mechanism for harvest operations
+     * @return Current locked profit amount
+     */
+    function getCurrentLockedProfit() external view returns (uint256);
+
+    /**
+     * @notice Calculates time remaining until user can perform next rate-limited operation
+     * @param user Address of the user to check
+     * @return Time remaining in seconds (0 if can operate immediately)
+     */
+    function getTimeUntilNextOperation(
+        address user
+    ) external view returns (uint256);
 }
