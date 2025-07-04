@@ -772,6 +772,392 @@ contract StableSwap is
     }
 
     /**
+     * @notice Simulates a swap to preview output amount and fees
+     * @param i Index of input token
+     * @param j Index of output token
+     * @param dx Amount of input tokens
+     * @return dy Expected output amount
+     * @return fee Fee amount that will be charged
+     * @return priceImpact Price impact in basis points
+     */
+    function previewSwap(
+        uint256 i,
+        uint256 j,
+        uint256 dx
+    ) external view returns (uint256 dy, uint256 fee, uint256 priceImpact) {
+        require(i != j, "Cannot swap same token");
+
+        // Get current balances
+        uint256[N] memory xp = _xp();
+        uint256 x = xp[i] + dx * multipliers[i];
+
+        // Calculate output before fees
+        uint256 y0 = xp[j];
+        uint256 y1 = _getY(i, j, x, xp);
+        uint256 dyBeforeFee = (y0 - y1 - 1) / multipliers[j];
+
+        // Calculate fee
+        fee = (dyBeforeFee * SWAP_FEE) / FEE_DENOMINATOR;
+        dy = dyBeforeFee - fee;
+
+        // Calculate price impact
+        uint256 idealRate = (xp[j] * 1e18) / xp[i]; // Current exchange rate
+        uint256 actualRate = (dy * 1e18) / dx; // Rate user gets
+        priceImpact = idealRate > actualRate
+            ? ((idealRate - actualRate) * 10000) / idealRate
+            : 0;
+    }
+
+    /**
+     * @notice Preview add liquidity operation without executing it
+     * @dev Simulates addLiquidity to show expected LP tokens and fees
+     * @param amounts Array of token amounts to deposit [MNT, stMNT]
+     * @return shares Expected amount of LP tokens to be minted
+     * @return fees Array of fees for imbalanced deposits [MNT_fee, stMNT_fee]
+     */
+    function previewAddLiquidity(
+        uint256[N] calldata amounts
+    ) external view returns (uint256 shares, uint256[N] memory fees) {
+        // Calculate current liquidity
+        uint256 _totalSupply = totalSupply();
+        uint256 d0;
+        uint256[N] memory old_xs = _xpWithFreeFunds();
+
+        if (_totalSupply > 0) {
+            d0 = _getD(old_xs);
+        }
+
+        // Calculate new balances after deposit
+        uint256[N] memory new_xs;
+        for (uint256 i; i < N; ++i) {
+            new_xs[i] = old_xs[i] + amounts[i] * multipliers[i];
+        }
+
+        // Calculate new liquidity
+        uint256 d1 = _getD(new_xs);
+        require(d1 > d0, "Liquidity must increase");
+
+        // Calculate fees for imbalanced deposits
+        uint256[N] memory new_xs_with_fees = new_xs;
+        fees = [uint256(0), uint256(0)]; // Initialize fees array
+
+        if (_totalSupply > 0) {
+            for (uint256 i; i < N; ++i) {
+                uint256 idealBalance = (old_xs[i] * d1) / d0;
+                uint256 diff = Math.abs(new_xs[i], idealBalance);
+                uint256 fee = (LIQUIDITY_FEE * diff) / FEE_DENOMINATOR;
+
+                // Calculate fee in token terms
+                fees[i] = fee / multipliers[i];
+                new_xs_with_fees[i] -= fee;
+            }
+        }
+
+        // Calculate final liquidity after fees
+        uint256 d2;
+        if (_totalSupply > 0) {
+            d2 = _getD(new_xs_with_fees);
+        } else {
+            d2 = d1;
+        }
+
+        // Calculate shares to mint
+        if (_totalSupply > 0) {
+            shares = ((d2 - d0) * _totalSupply) / d0;
+        } else {
+            shares = d2;
+        }
+    }
+
+    /**
+     * @notice Preview remove liquidity operation without executing it
+     * @dev Simulates removeLiquidity to show expected token amounts
+     * @param shares Amount of LP tokens to burn
+     * @return amountsOut Array of token amounts that would be received [MNT, stMNT]
+     * @return actualAmountsOut Array of actual withdrawable amounts considering liquidity [MNT, stMNT]
+     */
+    function previewRemoveLiquidity(
+        uint256 shares
+    )
+        external
+        view
+        returns (
+            uint256[N] memory amountsOut,
+            uint256[N] memory actualAmountsOut
+        )
+    {
+        uint256 _totalSupply = totalSupply();
+        require(_totalSupply > 0, "No liquidity to remove");
+        require(shares <= _totalSupply, "Cannot burn more shares than supply");
+
+        // Calculate proportional amounts
+        uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
+        uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
+
+        amountsOut[0] = mntAmountOut;
+        amountsOut[1] = stMntAmountOut;
+
+        // Calculate actual withdrawable amounts considering strategy funds
+        uint256 liquidMnt = balances[0] > totalLentToStrategy
+            ? balances[0] - totalLentToStrategy
+            : 0;
+
+        // For MNT: check if we have enough liquid funds
+        actualAmountsOut[0] = liquidMnt >= mntAmountOut
+            ? mntAmountOut
+            : liquidMnt;
+
+        // For stMNT: should always be available as it's not lent to strategy
+        actualAmountsOut[1] = stMntAmountOut;
+    }
+
+    /**
+     * @notice Preview remove liquidity with strategy recall simulation
+     * @dev More accurate preview that accounts for strategy withdrawal capacity
+     * @param shares Amount of LP tokens to burn
+     * @return amountsOut Expected token amounts [MNT, stMNT]
+     * @return needsRecall Whether strategy funds need to be recalled
+     * @return recallAmount Amount that needs to be recalled from strategy
+     */
+    function previewRemoveLiquidityWithRecall(
+        uint256 shares
+    )
+        external
+        view
+        returns (
+            uint256[N] memory amountsOut,
+            bool needsRecall,
+            uint256 recallAmount
+        )
+    {
+        uint256 _totalSupply = totalSupply();
+        require(_totalSupply > 0, "No liquidity to remove");
+        require(shares <= _totalSupply, "Cannot burn more shares than supply");
+
+        // Calculate proportional amounts
+        uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
+        uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
+
+        amountsOut[0] = mntAmountOut;
+        amountsOut[1] = stMntAmountOut;
+
+        // Check if strategy recall is needed
+        uint256 liquidMnt = balances[0] > totalLentToStrategy
+            ? balances[0] - totalLentToStrategy
+            : 0;
+
+        if (liquidMnt < mntAmountOut) {
+            needsRecall = true;
+            recallAmount = mntAmountOut - liquidMnt;
+        } else {
+            needsRecall = false;
+            recallAmount = 0;
+        }
+    }
+
+    /**
+     * @notice Preview add liquidity with detailed breakdown
+     * @dev Provides comprehensive preview including price impact and optimal ratios
+     * @param amounts Array of token amounts to deposit [MNT, stMNT]
+     * @return shares Expected LP tokens
+     * @return fees Deposit fees [MNT_fee, stMNT_fee]
+     * @return priceImpact Price impact in basis points
+     * @return optimalRatio Optimal deposit ratio for minimal fees
+     */
+    function previewAddLiquidityDetailed(
+        uint256[N] calldata amounts
+    )
+        external
+        view
+        returns (
+            uint256 shares,
+            uint256[N] memory fees,
+            uint256 priceImpact,
+            uint256[N] memory optimalRatio
+        )
+    {
+        // Get basic preview
+        (shares, fees) = this.previewAddLiquidity(amounts);
+
+        // Calculate current pool ratios
+        uint256 totalValue = balances[0] + balances[1]; // Simplified for same decimals
+        if (totalValue > 0) {
+            optimalRatio[0] = (balances[0] * 1e18) / totalValue;
+            optimalRatio[1] = (balances[1] * 1e18) / totalValue;
+        } else {
+            optimalRatio[0] = 5e17; // 50%
+            optimalRatio[1] = 5e17; // 50%
+        }
+
+        // Calculate price impact (simplified)
+        uint256 totalDeposit = amounts[0] + amounts[1];
+        uint256 totalFees = fees[0] + fees[1];
+
+        if (totalDeposit > 0) {
+            priceImpact = (totalFees * 10000) / totalDeposit; // In basis points
+        } else {
+            priceImpact = 0;
+        }
+    }
+
+    /**
+     * @notice Preview single token withdrawal with detailed breakdown
+     * @dev Enhanced version of calcWithdrawOneToken with liquidity and strategy considerations
+     * @param shares Amount of LP tokens to burn
+     * @param i Index of token to withdraw (0 = MNT, 1 = stMNT)
+     * @return dy Amount of token i that would be received
+     * @return fee Imbalance fee for single-sided withdrawal
+     * @return actualWithdrawable Actual amount withdrawable considering liquidity
+     * @return needsRecall Whether strategy funds need to be recalled (only for MNT)
+     * @return recallAmount Amount that needs to be recalled from strategy
+     */
+    function previewRemoveLiquidityOneToken(
+        uint256 shares,
+        uint256 i
+    )
+        external
+        view
+        returns (
+            uint256 dy,
+            uint256 fee,
+            uint256 actualWithdrawable,
+            bool needsRecall,
+            uint256 recallAmount
+        )
+    {
+        // Get basic calculation (already implemented)
+        (dy, fee) = _calcWithdrawOneToken(shares, i);
+
+        // For stMNT (index 1), always fully withdrawable
+        if (i == 1) {
+            actualWithdrawable = dy;
+            needsRecall = false;
+            recallAmount = 0;
+            return (dy, fee, actualWithdrawable, needsRecall, recallAmount);
+        }
+
+        // For MNT (index 0), check strategy liquidity
+        uint256 liquidMnt = IERC20(tokens[0]).balanceOf(address(this));
+
+        if (liquidMnt >= dy) {
+            // Enough liquid MNT available
+            actualWithdrawable = dy;
+            needsRecall = false;
+            recallAmount = 0;
+        } else {
+            // Need to recall from strategy
+            needsRecall = true;
+            recallAmount = dy - liquidMnt;
+
+            // Check if strategy has enough funds
+            if (totalLentToStrategy >= recallAmount) {
+                actualWithdrawable = dy;
+            } else {
+                // Strategy doesn't have enough, limit withdrawal
+                actualWithdrawable = liquidMnt + totalLentToStrategy;
+            }
+        }
+    }
+
+    /**
+     * @notice Preview single token withdrawal with price impact analysis
+     * @dev Provides comprehensive analysis including price impact and efficiency
+     * @param shares Amount of LP tokens to burn
+     * @param i Index of token to withdraw (0 = MNT, 1 = stMNT)
+     * @return dy Amount of token i that would be received
+     * @return fee Imbalance fee charged
+     * @return priceImpact Price impact in basis points
+     * @return efficiency Withdrawal efficiency vs proportional withdrawal (in basis points)
+     * @return proportionalAmount Amount that would be received in proportional withdrawal
+     */
+    function previewRemoveLiquidityOneTokenDetailed(
+        uint256 shares,
+        uint256 i
+    )
+        external
+        view
+        returns (
+            uint256 dy,
+            uint256 fee,
+            uint256 priceImpact,
+            uint256 efficiency,
+            uint256 proportionalAmount
+        )
+    {
+        // Get single token withdrawal amount
+        (dy, fee) = _calcWithdrawOneToken(shares, i);
+
+        // Calculate proportional withdrawal for comparison
+        uint256 _totalSupply = totalSupply();
+        proportionalAmount = (balances[i] * shares) / _totalSupply;
+
+        // Calculate efficiency (how much you get vs proportional)
+        if (proportionalAmount > 0) {
+            efficiency = (dy * 10000) / proportionalAmount; // In basis points
+        } else {
+            efficiency = 10000; // 100% if no comparison possible
+        }
+
+        // Calculate price impact based on fee
+        if (dy + fee > 0) {
+            priceImpact = (fee * 10000) / (dy + fee); // In basis points
+        } else {
+            priceImpact = 0;
+        }
+    }
+
+    /**
+     * @notice Compare withdrawal options for optimal user experience
+     * @dev Helps users choose between proportional and single-token withdrawal
+     * @param shares Amount of LP tokens to burn
+     * @return proportionalAmounts Amounts from proportional withdrawal [MNT, stMNT]
+     * @return singleTokenMNT Amount from MNT-only withdrawal (after fees)
+     * @return singleTokenStMNT Amount from stMNT-only withdrawal (after fees)
+     * @return feeMNT Fee for MNT-only withdrawal
+     * @return feeStMNT Fee for stMNT-only withdrawal
+     * @return bestOption Recommended option (0=proportional, 1=MNT only, 2=stMNT only)
+     */
+    function compareWithdrawalOptions(
+        uint256 shares
+    )
+        external
+        view
+        returns (
+            uint256[N] memory proportionalAmounts,
+            uint256 singleTokenMNT,
+            uint256 singleTokenStMNT,
+            uint256 feeMNT,
+            uint256 feeStMNT,
+            uint256 bestOption
+        )
+    {
+        // Get proportional withdrawal amounts
+        (proportionalAmounts, ) = this.previewRemoveLiquidity(shares);
+
+        // Get single token withdrawal amounts
+        (singleTokenMNT, feeMNT) = _calcWithdrawOneToken(shares, 0);
+        (singleTokenStMNT, feeStMNT) = _calcWithdrawOneToken(shares, 1);
+
+        // Calculate total value for each option (simplified - assumes 1:1 ratio)
+        uint256 proportionalValue = proportionalAmounts[0] +
+            proportionalAmounts[1];
+        uint256 mntOnlyValue = singleTokenMNT;
+        uint256 stMntOnlyValue = singleTokenStMNT;
+
+        // Determine best option
+        if (
+            proportionalValue >= mntOnlyValue &&
+            proportionalValue >= stMntOnlyValue
+        ) {
+            bestOption = 0; // Proportional
+        } else if (mntOnlyValue >= stMntOnlyValue) {
+            bestOption = 1; // MNT only
+        } else {
+            bestOption = 2; // stMNT only
+        }
+    }
+
+    /**
      * @notice Remove liquidity in single token
      * @param shares Amount of LP tokens to burn
      * @param i Index of token to withdraw (0 = MNT, 1 = stMNT)
@@ -919,7 +1305,6 @@ contract StableSwap is
             require(loss <= maxAllowedLoss, "Loss exceeds threshold");
         }
     }
-
 
     // =================================================================
     // GOVERNANCE FUNCTIONS
