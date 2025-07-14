@@ -318,6 +318,18 @@ contract StableSwap is
         _unpause();
     }
 
+    /**
+     * @notice Sync manuale dei balance - solo governance/keeper
+     */
+    function sync() external {
+        require(
+            hasRole(GOVERNANCE_ROLE, msg.sender) ||
+                hasRole(KEEPER_ROLE, msg.sender),
+            "AccessControl: sender must be GOVERNANCE_ROLE or KEEPER_ROLE"
+        );
+        _performSync();
+    }
+
     // =================================================================
     // CORE AMM MATHEMATICS
     // =================================================================
@@ -562,9 +574,8 @@ contract StableSwap is
         require(dy >= minDy, "Insufficient output amount");
 
         // Handle MNT withdrawals from strategy if needed
-        if (j == 0 && IERC20(tokens[0]).balanceOf(address(this)) < dy) {
-            uint256 amountNeeded = dy -
-                IERC20(tokens[0]).balanceOf(address(this));
+        if (j == 0 && (balances[0] - totalLentToStrategy) < dy) {
+            uint256 amountNeeded = dy - (balances[0] - totalLentToStrategy);
             IStrategyStMnt(strategy).poolCallWithdraw(amountNeeded);
         }
 
@@ -686,12 +697,20 @@ contract StableSwap is
 
         uint256 liquidMnt = balances[0] - totalLentToStrategy;
 
+        console.log("Io voglio prelevare -> ", mntAmountOut);
+
         // Recall funds from strategy if needed
         if (liquidMnt < mntAmountOut) {
             uint256 amountToRecall = mntAmountOut - liquidMnt;
+            console.log(
+                "quanto mi serve prelevare dalla strategia -> ",
+                amountToRecall
+            );
             uint256 actualRecalled = IStrategyStMnt(strategy).poolCallWithdraw(
                 amountToRecall
             );
+
+            console.log("actualRecalled -> ", actualRecalled);
 
             if (totalLentToStrategy < actualRecalled) {
                 totalLentToStrategy = 0;
@@ -701,12 +720,17 @@ contract StableSwap is
         }
 
         // Handle potential shortfall gracefully
-        uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
-        uint256 actualMntOut = actualBalance < mntAmountOut
-            ? actualBalance
-            : mntAmountOut;
+        //uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
+        uint256 availableBalance = balances[0] > totalLentToStrategy
+            ? balances[0] - totalLentToStrategy
+            : 0;
 
-        balances[0] -= mntAmountOut;
+        uint256 actualMntOut = availableBalance >= mntAmountOut
+            ? mntAmountOut
+            : availableBalance;
+
+        console.log("Bilancio contabile -> ", balances[0]);
+        balances[0] -= actualMntOut;
         balances[1] -= stMntAmountOut;
 
         amountsOut[0] = actualMntOut;
@@ -714,7 +738,20 @@ contract StableSwap is
 
         _burn(msg.sender, shares);
 
-        IERC20(tokens[0]).safeTransfer(msg.sender, actualMntOut);
+        console.log(
+            "Bilancio reale -> ",
+            IERC20(tokens[0]).balanceOf(address(this))
+        );
+        console.log("Quanto voglio prelevare -> ", actualMntOut);
+
+        if (balances[0] == 0) {
+            IERC20(tokens[0]).safeTransfer(
+                msg.sender,
+                (actualMntOut * 9998) / 10000
+            );
+        } else {
+            IERC20(tokens[0]).safeTransfer(msg.sender, actualMntOut);
+        }
         IERC20(tokens[1]).safeTransfer(msg.sender, stMntAmountOut);
     }
 
@@ -1037,7 +1074,7 @@ contract StableSwap is
         }
 
         // For MNT (index 0), check strategy liquidity
-        uint256 liquidMnt = IERC20(tokens[0]).balanceOf(address(this));
+        uint256 liquidMnt = balances[0] - totalLentToStrategy;
 
         if (liquidMnt >= dy) {
             // Enough liquid MNT available
@@ -1174,7 +1211,7 @@ contract StableSwap is
 
         // Handle MNT withdrawals with strategy recall
         if (i == 0) {
-            uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
+            uint256 actualBalance = balances[0] - totalLentToStrategy;
             uint256 tolerance = amountOut / 1000000; // 0.0001% tolerance
             if (tolerance == 0) tolerance = 1; // Minimum 1 wei tolerance
 
@@ -1191,7 +1228,7 @@ contract StableSwap is
                 }
             }
 
-            uint256 finalBalance = IERC20(tokens[0]).balanceOf(address(this));
+            uint256 finalBalance = balances[0] - totalLentToStrategy;
             if (finalBalance < amountOut) {
                 amountOut = finalBalance;
             }
@@ -1286,7 +1323,7 @@ contract StableSwap is
         _pause();
         strategyPaused = true;
         totalLentToStrategy = 0; // Strategy returns all funds
-        balances[0] = IERC20(tokens[0]).balanceOf(address(this));
+        //balances[0] = IERC20(tokens[0]).balanceOf(address(this));
     }
 
     // =================================================================
@@ -1337,5 +1374,63 @@ contract StableSwap is
         require(_wmntOut >= _amount, "Withdrawn amount is less than requested");
 
         totalLentToStrategy -= _wmntOut;
+    }
+
+    address private syncDeposit;
+
+    function setTreasury(address _treasury) external onlyGovernance {
+        require(_treasury != address(0), "Invalid treasury");
+        syncDeposit = _treasury;
+    }
+
+    function _performSync() internal {
+        uint256 actualBalance0 = IERC20(tokens[0]).balanceOf(address(this));
+        uint256 actualBalance1 = IERC20(tokens[1]).balanceOf(address(this));
+
+        uint256 expectedBalance0 = actualBalance0 >= totalLentToStrategy
+            ? actualBalance0 - totalLentToStrategy
+            : 0;
+
+        if (balances[0] != expectedBalance0 || balances[1] != actualBalance1) {
+            emit BalanceDiscrepancyDetected(
+                balances[0],
+                expectedBalance0,
+                balances[1],
+                actualBalance1
+            );
+
+            IERC20(tokens[0]).safeTransfer(
+                syncDeposit,
+                actualBalance0 - (balances[0])
+            );
+            IERC20(tokens[1]).safeTransfer(
+                syncDeposit,
+                actualBalance1 - (balances[1])
+            );
+
+            emit BalancesSynced(balances[0], balances[1]);
+        }
+    }
+
+    function checkBalanceHealth()
+        external
+        view
+        returns (
+            bool isHealthy,
+            uint256 recordedBalance0,
+            uint256 actualBalance0,
+            uint256 recordedBalance1,
+            uint256 actualBalance1
+        )
+    {
+        actualBalance0 = IERC20(tokens[0]).balanceOf(address(this));
+        actualBalance1 = IERC20(tokens[1]).balanceOf(address(this));
+
+        recordedBalance0 = balances[0] + totalLentToStrategy;
+        recordedBalance1 = balances[1];
+
+        isHealthy =
+            (actualBalance0 == recordedBalance0) &&
+            (actualBalance1 == recordedBalance1);
     }
 }

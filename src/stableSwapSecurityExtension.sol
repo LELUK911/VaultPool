@@ -112,6 +112,16 @@ contract StableSwapSecurityExtensions {
      */
     event EmergencyShutdown(bool activated);
 
+    event BalanceDiscrepancyDetected(
+        uint256 recorded0,
+        uint256 actual0,
+        uint256 recorded1,
+        uint256 actual1
+    );
+
+
+    event BalancesSynced(uint256 newBalance0, uint256 newBalance1);
+
     // =================================================================
     // MODIFIERS
     // =================================================================
@@ -131,6 +141,8 @@ contract StableSwapSecurityExtensions {
     modifier onlyGovernance() virtual {
         _;
     }
+
+
 
     // =================================================================
     // CORE SECURITY FUNCTIONS
@@ -261,6 +273,9 @@ contract StableSwapSecurityExtensions {
             _newDegradation
         );
     }
+
+
+
 
     // =================================================================
     // VIEW FUNCTIONS

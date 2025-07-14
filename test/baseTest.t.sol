@@ -270,4 +270,12 @@ contract BaseTest is Test {
         vm.prank(_user);
         pool.recoverERC20(token, to);
     }
+
+
+
+    function sync() internal {
+        vm.prank(owner);
+        pool.sync();
+        console.log("Sync submitted");
+    }
 }
