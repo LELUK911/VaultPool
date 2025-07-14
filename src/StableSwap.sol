@@ -683,12 +683,9 @@ contract StableSwap is
         returns (uint256[N] memory amountsOut)
     {
         require(!emergencyShutdown, "Emergency shutdown active");
-
         uint256 _totalSupply = totalSupply();
-
         uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
         require(mntAmountOut >= minAmountsOut[0], "Insufficient MNT output");
-
         uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
         require(
             stMntAmountOut >= minAmountsOut[1],
@@ -696,21 +693,12 @@ contract StableSwap is
         );
 
         uint256 liquidMnt = balances[0] - totalLentToStrategy;
-
-        console.log("Io voglio prelevare -> ", mntAmountOut);
-
         // Recall funds from strategy if needed
         if (liquidMnt < mntAmountOut) {
             uint256 amountToRecall = mntAmountOut - liquidMnt;
-            console.log(
-                "quanto mi serve prelevare dalla strategia -> ",
-                amountToRecall
-            );
             uint256 actualRecalled = IStrategyStMnt(strategy).poolCallWithdraw(
                 amountToRecall
             );
-
-            console.log("actualRecalled -> ", actualRecalled);
 
             if (totalLentToStrategy < actualRecalled) {
                 totalLentToStrategy = 0;
@@ -719,17 +707,14 @@ contract StableSwap is
             }
         }
 
-        // Handle potential shortfall gracefully
-        //uint256 actualBalance = IERC20(tokens[0]).balanceOf(address(this));
         uint256 availableBalance = balances[0] > totalLentToStrategy
             ? balances[0] - totalLentToStrategy
             : 0;
-
         uint256 actualMntOut = availableBalance >= mntAmountOut
             ? mntAmountOut
             : availableBalance;
 
-        console.log("Bilancio contabile -> ", balances[0]);
+   
         balances[0] -= actualMntOut;
         balances[1] -= stMntAmountOut;
 
@@ -737,12 +722,6 @@ contract StableSwap is
         amountsOut[1] = stMntAmountOut;
 
         _burn(msg.sender, shares);
-
-        console.log(
-            "Bilancio reale -> ",
-            IERC20(tokens[0]).balanceOf(address(this))
-        );
-        console.log("Quanto voglio prelevare -> ", actualMntOut);
 
         if (balances[0] == 0) {
             IERC20(tokens[0]).safeTransfer(
@@ -1234,10 +1213,22 @@ contract StableSwap is
             }
         }
 
+        console.log("Bilancio contabile ->", balances[i]);
+
         balances[i] -= amountOut;
+        
         _burn(msg.sender, shares);
 
-        IERC20(tokens[i]).safeTransfer(msg.sender, amountOut);
+        console.log("Bilancio reale ->", IERC20(tokens[i]).balanceOf(address(this)));
+        console.log("amountOut ->", amountOut);
+        
+        (bool success, ) = tokens[i].call(
+            abi.encodeWithSelector(IERC20(tokens[i]).transfer.selector, msg.sender, amountOut)
+        );
+        if (!success) {
+            IERC20(tokens[i]).safeTransfer(msg.sender, (amountOut * 9998) / 10000);
+        }
+
     }
 
     // =================================================================

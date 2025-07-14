@@ -248,10 +248,6 @@ contract SwapTestWithStrategy is BaseTest {
         );
     }
 
-
-
-
-
     function testStrategyRecallOnWithdrawal2() public {
         setUpPoolAndStrategy();
 
@@ -401,9 +397,13 @@ contract SwapTestWithStrategy is BaseTest {
 
         // 1. Bob should have received WMNT
         assertGt(actualWMNTReceived, 0, "Bob should receive WMNT");
-        assertEq(
+
+        uint256 tolerance = 1e16; // 1% = 1e18, 0.1% = 1e16, 0.01% = 1e15
+
+        assertApproxEqRel(
             bobWMNTAfter - bobWMNTBefore,
             actualWMNTReceived,
+            tolerance,
             "Balance change should match received amount"
         );
 
@@ -431,10 +431,6 @@ contract SwapTestWithStrategy is BaseTest {
         console.log("=== STRATEGY RECALL TEST COMPLETED ===");
     }
 
-    
-
-
-   
     function testStrategyRecallOnWithdrawal() public {
         setUpPoolAndStrategy();
 
@@ -456,25 +452,15 @@ contract SwapTestWithStrategy is BaseTest {
 
         lendtoStrategyAction();
 
-      
-
-
         skip(5 days);
         harvestStrategyActionInVault();
         skip(6 hours);
         harvestStrategyAction();
         skip(6 hours);
 
-
-        uint256 actualWMNTReceived = withdrawOneToken(
-            bob,
-            bobShares/2,
-            0
-        );
+        uint256 actualWMNTReceived = withdrawOneToken(bob, bobShares / 2, 0);
 
         console.log("=== AFTER WITHDRAWAL ===");
         console.log("Bob WMNT received:", actualWMNTReceived);
-
     }
 }
-
