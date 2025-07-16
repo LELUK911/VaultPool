@@ -161,6 +161,30 @@ contract StableSwap is
         uint256 shares
     );
 
+    modifier maxTradeSize(uint256 _amount, uint256 _tokenIndex) {
+        if (_amount <= minGuaranteedTrade) {
+            _;
+            return;
+        }
+
+        uint256 tokenBalance = balances[_tokenIndex];
+
+        uint256 maxRelativeTrade = (tokenBalance * maxRelativeTradeSize) /
+            10000;
+        uint256 effectiveLimit = maxRelativeTrade < minGuaranteedTrade
+            ? minGuaranteedTrade
+            : maxRelativeTrade;
+
+        if (tokenBalance > maxAbsoluteTradeSize * 20 ) {
+            effectiveLimit = effectiveLimit > maxAbsoluteTradeSize
+                ? maxAbsoluteTradeSize
+                : effectiveLimit;
+        }
+
+        require(_amount <= effectiveLimit, "Trade size exceeds limit");
+        _;
+    }
+
     // =================================================================
     // CONSTRUCTOR
     // =================================================================
@@ -555,14 +579,14 @@ contract StableSwap is
         uint256 j,
         uint256 dx,
         uint256 minDy
-    ) external nonReentrant whenNotPaused returns (uint256 dy) {
+    ) external nonReentrant whenNotPaused maxTradeSize(dx,i) returns (uint256 dy) {
         require(!emergencyShutdown, "Emergency shutdown active");
         require(i != j, "Cannot swap same token");
 
         IERC20(tokens[i]).transferFrom(msg.sender, address(this), dx);
 
         // Calculate output amount using stable swap math
-        uint256[N] memory xp = _xp();
+        uint256[N] memory xp = _xpWithFreeFunds();
         uint256 x = xp[i] + dx * multipliers[i];
 
         uint256 y0 = xp[j];
@@ -684,9 +708,16 @@ contract StableSwap is
     {
         require(!emergencyShutdown, "Emergency shutdown active");
         uint256 _totalSupply = totalSupply();
-        uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
-        require(mntAmountOut >= minAmountsOut[0], "Insufficient MNT output");
+        require(_totalSupply > 0, "No liquidity to remove");
+
+        uint256 totalFreeMNT = _calculateFreeMNT();
+
+        uint256 mntAmountOut = (totalFreeMNT * shares) / _totalSupply;
         uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
+
+
+
+        require(mntAmountOut >= minAmountsOut[0], "Insufficient MNT output");
         require(
             stMntAmountOut >= minAmountsOut[1],
             "Insufficient stMNT output"
@@ -714,7 +745,6 @@ contract StableSwap is
             ? mntAmountOut
             : availableBalance;
 
-   
         balances[0] -= actualMntOut;
         balances[1] -= stMntAmountOut;
 
@@ -734,6 +764,33 @@ contract StableSwap is
         IERC20(tokens[1]).safeTransfer(msg.sender, stMntAmountOut);
     }
 
+
+    /**
+ * @notice Calcola l'MNT "libero" (escludendo locked profit)
+ * @dev Questo è l'MNT che gli utenti possono effettivamente prelevare
+ * @return Amount di MNT libero dal locked profit
+ */
+function _calculateFreeMNT() internal view returns (uint256) {
+    uint256 totalMNT = balances[0] + totalLentToStrategy;
+    uint256 lockedProfit = _calculateLockedProfit();
+    
+    if (lockedProfit == 0) {
+        return totalMNT;
+    }
+    
+    // Il locked profit riduce l'MNT disponibile per i withdrawal
+    uint256 totalAssets = _totalAssets();
+    
+    if (totalAssets == 0) {
+        return totalMNT;
+    }
+    
+    // Calcola quanta parte del locked profit è in MNT
+    uint256 lockedMNT = (lockedProfit * totalMNT) / totalAssets;
+    
+    return totalMNT > lockedMNT ? totalMNT - lockedMNT : 0;
+}
+
     /**
      * @notice Calculate withdrawal amount for single token
      * @param shares Amount of LP tokens to burn
@@ -746,7 +803,7 @@ contract StableSwap is
         uint256 i
     ) private view returns (uint256 dy, uint256 fee) {
         uint256 _totalSupply = totalSupply();
-        uint256[N] memory xp = _xp();
+        uint256[N] memory xp = _xpWithFreeFunds();
 
         // Calculate target liquidity after withdrawal
         uint256 d0 = _getD(xp);
@@ -804,7 +861,7 @@ contract StableSwap is
         require(i != j, "Cannot swap same token");
 
         // Get current balances
-        uint256[N] memory xp = _xp();
+        uint256[N] memory xp = _xpWithFreeFunds();
         uint256 x = xp[i] + dx * multipliers[i];
 
         // Calculate output before fees
@@ -906,8 +963,10 @@ contract StableSwap is
         require(_totalSupply > 0, "No liquidity to remove");
         require(shares <= _totalSupply, "Cannot burn more shares than supply");
 
+        uint freeMNT = _calculateFreeMNT();
+
         // Calculate proportional amounts
-        uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
+        uint256 mntAmountOut = (freeMNT * shares) / _totalSupply;
         uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
 
         amountsOut[0] = mntAmountOut;
@@ -950,8 +1009,11 @@ contract StableSwap is
         require(_totalSupply > 0, "No liquidity to remove");
         require(shares <= _totalSupply, "Cannot burn more shares than supply");
 
+        uint freeMNT = _calculateFreeMNT();
+
+
         // Calculate proportional amounts
-        uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
+        uint256 mntAmountOut = (freeMNT * shares) / _totalSupply;
         uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
 
         amountsOut[0] = mntAmountOut;
@@ -1216,19 +1278,28 @@ contract StableSwap is
         console.log("Bilancio contabile ->", balances[i]);
 
         balances[i] -= amountOut;
-        
+
         _burn(msg.sender, shares);
 
-        console.log("Bilancio reale ->", IERC20(tokens[i]).balanceOf(address(this)));
+        console.log(
+            "Bilancio reale ->",
+            IERC20(tokens[i]).balanceOf(address(this))
+        );
         console.log("amountOut ->", amountOut);
-        
+
         (bool success, ) = tokens[i].call(
-            abi.encodeWithSelector(IERC20(tokens[i]).transfer.selector, msg.sender, amountOut)
+            abi.encodeWithSelector(
+                IERC20(tokens[i]).transfer.selector,
+                msg.sender,
+                amountOut
+            )
         );
         if (!success) {
-            IERC20(tokens[i]).safeTransfer(msg.sender, (amountOut * 9998) / 10000);
+            IERC20(tokens[i]).safeTransfer(
+                msg.sender,
+                (amountOut * 9998) / 10000
+            );
         }
-
     }
 
     // =================================================================

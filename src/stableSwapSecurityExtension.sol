@@ -68,6 +68,12 @@ contract StableSwapSecurityExtensions {
     /// @notice Flag indicating if emergency shutdown is active
     bool internal emergencyShutdown = false;
 
+
+
+    uint256 internal minGuaranteedTrade = 15000 ether; // Sempre permesso
+    uint256 internal maxRelativeTradeSize = 2000; // 20% del balance
+    uint256 internal maxAbsoluteTradeSize = 15000000 ether; // Hard cap per pool grandi
+
     // =================================================================
     // EVENTS
     // =================================================================
@@ -119,7 +125,6 @@ contract StableSwapSecurityExtensions {
         uint256 actual1
     );
 
-
     event BalancesSynced(uint256 newBalance0, uint256 newBalance1);
 
     // =================================================================
@@ -141,8 +146,6 @@ contract StableSwapSecurityExtensions {
     modifier onlyGovernance() virtual {
         _;
     }
-
-
 
     // =================================================================
     // CORE SECURITY FUNCTIONS
@@ -273,9 +276,6 @@ contract StableSwapSecurityExtensions {
             _newDegradation
         );
     }
-
-
-
 
     // =================================================================
     // VIEW FUNCTIONS
