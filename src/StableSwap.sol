@@ -710,11 +710,15 @@ contract StableSwap is
         uint256 _totalSupply = totalSupply();
         require(_totalSupply > 0, "No liquidity to remove");
 
+
+     uint256 mntAmountOut = (balances[0] * shares) / _totalSupply;
+    uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
+
         uint256 totalFreeMNT = _calculateFreeMNT();
+        uint256 expectedFreeMNT = (totalFreeMNT * shares) / _totalSupply;
 
-        uint256 mntAmountOut = (totalFreeMNT * shares) / _totalSupply;
-        uint256 stMntAmountOut = (balances[1] * shares) / _totalSupply;
-
+        require(expectedFreeMNT >= minAmountsOut[0], "Insufficient MNT output (considering locked profit)");
+        require(stMntAmountOut >= minAmountsOut[1], "Insufficient stMNT output");
 
 
         require(mntAmountOut >= minAmountsOut[0], "Insufficient MNT output");
