@@ -235,4 +235,10 @@ interface IStableSwap is IERC20 {
     function getTimeUntilNextOperation(
         address user
     ) external view returns (uint256);
+
+    function previewSwap(
+        uint256 i,
+        uint256 j,
+        uint256 dx
+    ) external view returns (uint256 dy, uint256 fee, uint256 priceImpact);
 }
