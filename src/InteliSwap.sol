@@ -334,7 +334,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
     function _previewSwap(
         uint256 _amount
     )
-        internal
+        public
         view
         returns (uint256 _amountOut, uint256 fee, uint256 priceImpact)
     {
@@ -348,7 +348,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      */
     function _previewStake(
         uint256 _amount
-    ) internal view returns (uint256 _amountOut) {
+    ) public view returns (uint256 _amountOut) {
         uint256 priceShare = stMNT.pricePerShare();
         _amountOut = (_amount * PRECISION) / priceShare;
     }

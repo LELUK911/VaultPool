@@ -8,6 +8,8 @@ import {StableSwap} from "../src/StableSwap.sol";
 import {StrategyStMnt} from "../src/StrategyStMnt.sol";
 import {IVault} from "../src/interfaces/IVault.sol";
 
+import {IntelliSwap} from "../src/InteliSwap.sol";
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -44,6 +46,7 @@ contract BaseTest is Test {
 
     StableSwap public pool;
     StrategyStMnt public strategy;
+    IntelliSwap public intelliSwap;
 
     IVault public stVault =
         IVault(address(0xc0205beC85Cbb7f654c4a35d3d1D2a96a2217436));
@@ -271,11 +274,54 @@ contract BaseTest is Test {
         pool.recoverERC20(token, to);
     }
 
-
-
     function sync() internal {
         vm.prank(owner);
         pool.sync();
         console.log("Sync submitted");
+    }
+
+    function previewIntSwap(
+        uint256 _amount
+    )
+        internal
+        view
+        returns (
+            uint256 swapAmount,
+            uint256 stakeAmount,
+            uint256 swapOutput,
+            uint256 stakeOutput
+        )
+    {
+        (swapAmount, stakeAmount, swapOutput, stakeOutput, ) = intelliSwap
+            ._previewHybrid(_amount);
+    }
+
+    function previewOptimizerSwap(
+        uint256 _amount
+    ) internal view returns (uint256 _swap, uint256 _stMNT, uint256 _hybrid) {
+        (_swap, _stMNT, _hybrid) = intelliSwap.previewOptimizerSwap(_amount);
+    }
+
+    function executeHybridSwap(
+        address _user,
+        uint256 minOut,
+        uint256 swapAmount,
+        uint256 stakeAmount,
+        uint256 swapOutput,
+        uint256 stakeOutput
+    ) internal returns (uint256 _amountOut) {
+        vm.startPrank(_user);
+
+        WMNT.approve(address(intelliSwap), swapAmount + stakeAmount);
+
+        _amountOut = intelliSwap.executeHybridSwap(
+            minOut,
+            swapAmount,
+            stakeAmount,
+            swapOutput,
+            stakeOutput
+        );
+
+        vm.stopPrank();
     }
 }
