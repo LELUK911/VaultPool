@@ -62,4 +62,6 @@ interface IVault is IERC20 {
      * @return balance Amount of vault shares owned by the account
      */
     function balanceOf(address account) external view returns (uint256 balance);
+
+    function transfer(address account, uint256 amount) external returns (bool);
 }
