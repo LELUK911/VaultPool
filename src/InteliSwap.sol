@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import {console} from "forge-std/console.sol";
+
 import {IStableSwap} from "./interfaces/IstableSwap.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -68,6 +70,8 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
 
     /// @notice Accumulated fees available for collection
     uint256 private balanceFee;
+
+    uint256 private balanceFeeStMNT;
 
     // =================================================================
     //  ACCESS CONTROL ROLES
@@ -331,14 +335,24 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      * @return fee Swap fee charged by StableSwap
      * @return priceImpact Price impact of the swap
      */
-    function _previewSwap(
+    function _previewSwapIn(
         uint256 _amount
     )
-        public
+        internal
         view
         returns (uint256 _amountOut, uint256 fee, uint256 priceImpact)
     {
         (_amountOut, fee, priceImpact) = vaultSwap.previewSwap(0, 1, _amount);
+    }
+
+    function _previewSwapOut(
+        uint256 _amount
+    )
+        internal
+        view
+        returns (uint256 _amountOut, uint256 fee, uint256 priceImpact)
+    {
+        (_amountOut, fee, priceImpact) = vaultSwap.previewSwap(1, 0, _amount);
     }
 
     /**
@@ -348,9 +362,16 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      */
     function _previewStake(
         uint256 _amount
-    ) public view returns (uint256 _amountOut) {
+    ) internal view returns (uint256 _amountOut) {
         uint256 priceShare = stMNT.pricePerShare();
         _amountOut = (_amount * PRECISION) / priceShare;
+    }
+
+    function _previewUnStake(
+        uint256 _amount
+    ) internal view returns (uint256 _amountOut) {
+        uint256 priceShare = stMNT.pricePerShare();
+        _amountOut = (_amount * priceShare) / PRECISION;
     }
 
     /**
@@ -363,7 +384,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      * @return stakeOutput Expected output from stake portion
      * @dev Uses binary search to find the split that maximizes total output
      */
-    function _previewHybrid(
+    function _previewHybridIn(
         uint256 _amount
     )
         public
@@ -380,7 +401,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
         if (_amount == 0) return (0, 0, 0, 0, 0);
 
         // Get outputs for full swap and full stake
-        (uint256 fullSwapOut, , ) = _previewSwap(_amount);
+        (uint256 fullSwapOut, , ) = _previewSwapIn(_amount);
         uint256 fullStakeOut = _previewStake(_amount);
 
         // If staking is always better, stake everything
@@ -399,7 +420,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
             uint256 mid = (left + right) / 2;
 
             // Calculate outputs for this split
-            (uint256 swapOut, , ) = mid > 0 ? _previewSwap(mid) : (0, 0, 0);
+            (uint256 swapOut, , ) = mid > 0 ? _previewSwapIn(mid) : (0, 0, 0);
             uint256 stakeOut = (_amount - mid) > 0
                 ? _previewStake(_amount - mid)
                 : 0;
@@ -417,7 +438,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
             uint256 swapDelta = 1e15; // Small amount for derivative approximation
 
             // Marginal output from swapping more
-            (uint256 swapOutPlus, , ) = _previewSwap(mid + swapDelta);
+            (uint256 swapOutPlus, , ) = _previewSwapIn(mid + swapDelta);
             uint256 marginalSwap = swapOutPlus > swapOut
                 ? ((swapOutPlus - swapOut) * PRECISION) / swapDelta
                 : 0;
@@ -445,13 +466,99 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
     }
 
     /**
+     * @notice Calculate optimal hybrid approach using binary search for unstaking
+     * @param _amount Total amount of stMNT to convert
+     * @return amountOut Total expected MNT output
+     * @return swapAmount Optimal amount to send to StableSwap
+     * @return unstakeAmount Optimal amount to send to direct unstaking
+     * @return swapOutput Expected output from swap portion
+     * @return unstakeOutput Expected output from unstake portion
+     * @dev Uses binary search to find the split that maximizes total output
+     */
+   function _previewHybridOut(uint256 _amount)
+    public
+    view
+    returns (
+        uint256 amountOut,
+        uint256 swapAmount,
+        uint256 unstakeAmount,
+        uint256 swapOutput,
+        uint256 unstakeOutput
+    )
+{
+    if (_amount == 0) return (0, 0, 0, 0, 0);
+
+    (uint256 fullSwapOut, , ) = _previewSwapOut(_amount);
+    uint256 fullUnstakeOut = _previewUnStake(_amount);
+
+    // Se la differenza è minima, usa il migliore direttamente
+    if (fullUnstakeOut >= fullSwapOut) {
+        return (fullUnstakeOut, 0, _amount, 0, fullUnstakeOut);
+    }
+
+    uint256 left = 0;
+    uint256 right = _amount;
+    uint256 optimalSwap = _amount;  // 🚨 FIX: Start with pure swap as baseline
+    uint256 maxOutput = fullSwapOut;
+    uint256 bestSwapOutput = fullSwapOut;
+    uint256 bestUnstakeOutput = 0;
+
+    for (uint256 i = 0; i < MAX_ITERATIONS; i++) {
+        uint256 mid = (left + right) / 2;
+
+        (uint256 swapOut, , ) = mid > 0 ? _previewSwapOut(mid) : (0, 0, 0);
+        uint256 unstakeOut = (_amount - mid) > 0 ? _previewUnStake(_amount - mid) : 0;
+        uint256 totalOut = swapOut + unstakeOut;
+
+        if (totalOut > maxOutput) {
+            maxOutput = totalOut;
+            optimalSwap = mid;
+            bestSwapOutput = swapOut;
+            bestUnstakeOutput = unstakeOut;
+        }
+
+        // Edge case protection
+        if (mid + 1e15 > _amount) break;
+
+        uint256 swapDelta = 1e15;
+        (uint256 swapOutPlus, , ) = _previewSwapOut(mid + swapDelta);
+        uint256 marginalSwap = swapOutPlus > swapOut
+            ? ((swapOutPlus - swapOut) * PRECISION) / swapDelta
+            : 0;
+
+        uint256 marginalUnstake = stMNT.pricePerShare();
+
+        if (marginalSwap > marginalUnstake) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+
+        if (right - left <= CONVERGENCE_THRESHOLD) break;
+    }
+
+    swapAmount = optimalSwap;
+    unstakeAmount = _amount - optimalSwap;
+    swapOutput = bestSwapOutput;
+    unstakeOutput = bestUnstakeOutput;
+    amountOut = maxOutput;
+}
+
+    /**
      * @notice Calculate and accumulate optimization fee
      * @param _amount Amount to calculate fee on
      * @return _fee Fee amount calculated
      */
-    function _takeFee(uint256 _amount) internal returns (uint256 _fee) {
+    function _takeFee(
+        uint256 _amount,
+        bool _in
+    ) internal returns (uint256 _fee) {
         _fee = (_amount * optimizeFee) / 10000;
-        balanceFee += _fee;
+        if (_in) {
+            balanceFeeStMNT += _fee;
+        } else {
+            balanceFee += _fee;
+        }
     }
 
     /**
@@ -462,12 +569,20 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      * @return _hybrid Expected output from optimal hybrid approach
      * @dev Use this to compare all methods before executing
      */
-    function previewOptimizerSwap(
+    function previewOptimizerSwapIn(
         uint256 _amount
     ) external view returns (uint256 _swap, uint256 _stMNT, uint256 _hybrid) {
-        (_swap, , ) = _previewSwap(_amount);
+        (_swap, , ) = _previewSwapIn(_amount);
         _stMNT = _previewStake(_amount);
-        (_hybrid, , , , ) = _previewHybrid(_amount);
+        (_hybrid, , , , ) = _previewHybridIn(_amount);
+    }
+
+    function previewOptimizerSwapOut(
+        uint256 _amount
+    ) external view returns (uint256 _swap, uint256 _wmnt, uint256 _hybrid) {
+        (_swap, , ) = _previewSwapOut(_amount);
+        _wmnt = _previewUnStake(_amount);
+        (_hybrid, , , , ) = _previewHybridOut(_amount);
     }
 
     // =================================================================
@@ -484,7 +599,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      * @return _amountOut Actual stMNT amount received (after fees)
      * @dev User should call previewHybrid first to get optimal parameters
      */
-    function executeHybridSwap(
+    function executeHybridSwapIn(
         uint256 minOut,
         uint256 swapAmount,
         uint256 stakeAmount,
@@ -526,7 +641,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
             actualStakeOut = stMNT.deposit(stakeAmount, address(this));
 
             // Validate staking output (0.01% slippage tolerance)
-            if (actualStakeOut < (stakeOutput * 9999) / 10000) {
+            if (actualStakeOut < (stakeOutput * 9950) / 10000) {
                 revert SlippageTooHigh(stakeOutput, actualStakeOut);
             }
         }
@@ -535,7 +650,7 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
         uint256 totalOutput = actualSwapOut + actualStakeOut;
 
         // Calculate and deduct optimization fee
-        uint256 feeAmount = _takeFee(totalOutput);
+        uint256 feeAmount = _takeFee(totalOutput, true);
         _amountOut = totalOutput - feeAmount;
 
         // Validate minimum output requirement
@@ -558,6 +673,74 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
         emit OptimizationCalculated(swapAmount, stakeAmount, totalOutput);
     }
 
+    function executeHybridSwapOut(
+        uint256 minOut,
+        uint256 swapAmount,
+        uint256 unStakeAmount,
+        uint256 swapOutput,
+        uint256 stakeOutput
+    ) external nonReentrant whenNotPaused returns (uint256 _amountOut) {
+        uint256 totalInput = swapAmount + unStakeAmount;
+
+        if (totalInput == 0) {
+            revert AmountZero();
+        }
+
+        // Transfer input tokens from user
+        stMNT.transferFrom(msg.sender, address(this), totalInput);
+
+        uint256 actualSwapOut = 0;
+        uint256 actualStakeOut = 0;
+
+        // Execute swap portion if applicable
+        if (swapAmount > 0) {
+            stMNT.approve(address(vaultSwap), swapAmount);
+            actualSwapOut = vaultSwap.swap(
+                1,
+                0,
+                swapAmount,
+                (swapOutput * 9999) / 10000
+            );
+        }
+
+        // Execute unstake portion if applicable
+        if (unStakeAmount > 0) {
+            actualStakeOut = stMNT.withdraw(unStakeAmount, address(this), 0);
+
+            console.log("actualStakeOut -> ", actualStakeOut);
+            console.log("stakeOutput -> ", stakeOutput);
+
+            if (actualStakeOut < (stakeOutput * 9950) / 10000) {
+                revert SlippageTooHigh(stakeOutput, actualStakeOut);
+            }
+        }
+
+        // Calculate total output before fees
+        uint256 totalOutput = actualSwapOut + actualStakeOut;
+
+        // Calculate and deduct optimization fee
+        uint256 feeAmount = _takeFee(totalOutput, false);
+        _amountOut = totalOutput - feeAmount;
+
+        // Validate minimum output requirement
+        if (_amountOut < minOut) {
+            revert InsufficientOutput(_amountOut, minOut);
+        }
+
+        WMNT.safeTransfer(msg.sender, _amountOut);
+
+        emit HybridSwapExecuted(
+            msg.sender,
+            totalInput,
+            _amountOut,
+            swapAmount,
+            unStakeAmount,
+            feeAmount
+        );
+
+        emit OptimizationCalculated(swapAmount, unStakeAmount, totalOutput);
+    }
+
     // =================================================================
     //  FEE MANAGEMENT
     // =================================================================
@@ -568,11 +751,21 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      * @dev Can only be called by treasury admin
      */
     function collectFee() external onlyTreasury {
-        if (balanceFee == 0) {
-            revert AmountZero();
+        uint256 _balanceFeeStMNT = balanceFeeStMNT;
+        if (_balanceFeeStMNT > 0) {
+            balanceFeeStMNT = 0;
+            uint256 amountOut = stMNT.withdraw(
+                _balanceFeeStMNT,
+                address(this),
+                (_balanceFeeStMNT * 9999) / 10000
+            );
+            balanceFee += amountOut;
         }
 
         uint256 totalFees = balanceFee;
+        if (totalFees == 0) {
+            revert AmountZero();
+        }
         uint256 _feeBoost = (totalFees * 8000) / 10000; // 80%
         uint256 _feeManagement = (totalFees * 2000) / 10000; // 20%
 
@@ -614,6 +807,10 @@ contract IntelliSwap is ReentrancyGuard, AccessControl, Pausable {
      */
     function getBalanceFee() external view returns (uint256) {
         return balanceFee;
+    }
+
+    function getBalanceFeeStMNT() external view returns (uint256) {
+        return balanceFeeStMNT;
     }
 
     /**

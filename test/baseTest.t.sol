@@ -99,6 +99,20 @@ contract BaseTest is Test {
         vm.stopPrank();
     }
 
+    function setUpIntelliSwap() internal {
+        intelliSwap = new IntelliSwap(
+            address(pool),
+            address(stMNT),
+            owner,
+            owner,
+            owner
+        );
+
+        vm.startPrank(owner);
+        intelliSwap.setOptimizeFee(10); // set fee to 0.1%
+        vm.stopPrank();
+    }
+
     function giveMeWMNT(address _user, uint256 amount) internal {
         vm.startPrank(_user);
         vm.deal(_user, amount);
@@ -293,16 +307,16 @@ contract BaseTest is Test {
         )
     {
         (swapAmount, stakeAmount, swapOutput, stakeOutput, ) = intelliSwap
-            ._previewHybrid(_amount);
+            ._previewHybridIn(_amount);
     }
 
-    function previewOptimizerSwap(
+    function previewOptimizerSwapIn(
         uint256 _amount
     ) internal view returns (uint256 _swap, uint256 _stMNT, uint256 _hybrid) {
-        (_swap, _stMNT, _hybrid) = intelliSwap.previewOptimizerSwap(_amount);
+        (_swap, _stMNT, _hybrid) = intelliSwap.previewOptimizerSwapIn(_amount);
     }
 
-    function executeHybridSwap(
+    function executeHybridSwapIn(
         address _user,
         uint256 minOut,
         uint256 swapAmount,
@@ -314,7 +328,7 @@ contract BaseTest is Test {
 
         WMNT.approve(address(intelliSwap), swapAmount + stakeAmount);
 
-        _amountOut = intelliSwap.executeHybridSwap(
+        _amountOut = intelliSwap.executeHybridSwapIn(
             minOut,
             swapAmount,
             stakeAmount,
@@ -324,4 +338,47 @@ contract BaseTest is Test {
 
         vm.stopPrank();
     }
+
+    function getBalanceFee() internal view returns (uint256) {
+        return intelliSwap.getBalanceFee();
+    }
+
+
+    /**
+ * @notice Preview hybrid optimization for unstaking (stMNT → MNT)
+ */
+function executeHybridSwapOut(
+   address _user,
+   uint256 minOut,
+   uint256 swapAmount,
+   uint256 unstakeAmount,
+   uint256 swapOutput,
+   uint256 unstakeOutput
+) internal returns (uint256 _amountOut) {
+   vm.startPrank(_user);
+   
+   stMNT.approve(address(intelliSwap), swapAmount + unstakeAmount);
+   
+   _amountOut = intelliSwap.executeHybridSwapOut(
+       minOut,
+       swapAmount,
+       unstakeAmount,
+       swapOutput,
+       unstakeOutput
+   );
+   
+   vm.stopPrank();
+}
+
+/**
+ * @notice Preview all unstaking options (stMNT → MNT)
+ */
+function previewOptimizerSwapOut(
+    uint256 _amount
+) internal view returns (uint256 _swap, uint256 _wmnt, uint256 _hybrid) {
+    (_swap, _wmnt, _hybrid) = intelliSwap.previewOptimizerSwapOut(_amount);
+}
+
+
+
 }

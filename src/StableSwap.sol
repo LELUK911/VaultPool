@@ -863,14 +863,13 @@ function _calculateFreeMNT() internal view returns (uint256) {
         uint256 dx
     ) external view returns (uint256 dy, uint256 fee, uint256 priceImpact) {
         require(i != j, "Cannot swap same token");
-
         // Get current balances
         uint256[N] memory xp = _xpWithFreeFunds();
         uint256 x = xp[i] + dx * multipliers[i];
 
         // Calculate output before fees
         uint256 y0 = xp[j];
-        uint256 y1 = _getY(i, j, x, xp);
+        uint256 y1 = _getY(i, j, x, xp);//! reverta qui
         uint256 dyBeforeFee = (y0 - y1 - 1) / multipliers[j];
 
         // Calculate fee
@@ -883,6 +882,7 @@ function _calculateFreeMNT() internal view returns (uint256) {
         priceImpact = idealRate > actualRate
             ? ((idealRate - actualRate) * 10000) / idealRate
             : 0;
+            
     }
 
     /**
